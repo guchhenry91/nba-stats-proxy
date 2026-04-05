@@ -325,5 +325,139 @@ def nhl_gamelog(player_name):
         return jsonify({"error": str(e), "player": player_name}), 500
 
 
+# ── Soccer Endpoints ──────────────────────────────────────────────────────────
+# Fetches team form from TheSportsDB (free, no key) by scraping last 4 rounds.
+# Returns goals for/against, W-D-L, home/away splits for Poisson model.
+
+SOCCER_LEAGUES = {
+    "epl": {"id": 4328, "season": "2025-2026", "name": "English Premier League"},
+    "laliga": {"id": 4335, "season": "2025-2026", "name": "Spanish La Liga"},
+    "fa_cup": {"id": 4482, "season": "2025-2026", "name": "FA Cup"},
+    "ucl": {"id": 4480, "season": "2025-2026", "name": "UEFA Champions League"},
+}
+
+
+def fetch_league_results(league_id, season, rounds_back=6):
+    """Fetch completed match results from recent rounds."""
+    all_matches = []
+    # Find the latest round with completed games, then go back
+    for r in range(40, 0, -1):
+        try:
+            res = http_requests.get(
+                f"https://www.thesportsdb.com/api/v1/json/3/eventsround.php?id={league_id}&r={r}&s={season}",
+                timeout=8,
+            )
+            if res.status_code != 200:
+                continue
+            events = res.json().get("events") or []
+            completed = [
+                e for e in events
+                if e.get("intHomeScore") is not None and e.get("intHomeScore") != ""
+            ]
+            if completed:
+                all_matches.extend(completed)
+                rounds_back -= 1
+                if rounds_back <= 0:
+                    break
+        except Exception:
+            continue
+    return all_matches
+
+
+def compute_team_form(matches, team_name, max_games=10):
+    """Compute W-D-L, goals for/against, home/away from match list."""
+    games = []
+    for m in matches:
+        home = m.get("strHomeTeam", "")
+        away = m.get("strAwayTeam", "")
+        h_score = int(m.get("intHomeScore") or 0)
+        a_score = int(m.get("intAwayScore") or 0)
+        date = m.get("dateEvent", "")
+
+        if home.lower() == team_name.lower():
+            games.append({"gf": h_score, "ga": a_score, "is_home": True, "date": date})
+        elif away.lower() == team_name.lower():
+            games.append({"gf": a_score, "ga": h_score, "is_home": False, "date": date})
+
+    # Sort by date descending, take last N
+    games.sort(key=lambda x: x["date"], reverse=True)
+    games = games[:max_games]
+
+    if not games:
+        return None
+
+    wins = sum(1 for g in games if g["gf"] > g["ga"])
+    draws = sum(1 for g in games if g["gf"] == g["ga"])
+    losses = sum(1 for g in games if g["gf"] < g["ga"])
+    gf = sum(g["gf"] for g in games)
+    ga = sum(g["ga"] for g in games)
+    n = len(games)
+
+    home_games = [g for g in games if g["is_home"]]
+    away_games = [g for g in games if not g["is_home"]]
+
+    return {
+        "wins": wins, "draws": draws, "losses": losses,
+        "goals_for": round(gf / n, 2),
+        "goals_against": round(ga / n, 2),
+        "games": n,
+        "home_goals_for": round(sum(g["gf"] for g in home_games) / len(home_games), 2) if home_games else None,
+        "home_goals_ag": round(sum(g["ga"] for g in home_games) / len(home_games), 2) if home_games else None,
+        "away_goals_for": round(sum(g["gf"] for g in away_games) / len(away_games), 2) if away_games else None,
+        "away_goals_ag": round(sum(g["ga"] for g in away_games) / len(away_games), 2) if away_games else None,
+        "home_games": len(home_games),
+        "away_games": len(away_games),
+        "latest_date": games[0]["date"] if games else None,
+    }
+
+
+@app.route("/api/soccer/team/<team_name>/form")
+def soccer_team_form(team_name):
+    """
+    Returns team form (W-D-L, goals for/against, home/away splits).
+    Query params: league (epl, laliga, fa_cup, ucl)
+    """
+    league_key = request.args.get("league", "epl")
+    league = SOCCER_LEAGUES.get(league_key)
+    if not league:
+        return jsonify({"error": f"Unknown league: {league_key}"}), 400
+
+    cache_key = f"soccer_{league_key}_{team_name.lower()}"
+    cached = get_cached(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    try:
+        matches = fetch_league_results(league["id"], league["season"])
+        if not matches:
+            return jsonify({"error": "No matches found"}), 404
+
+        form = compute_team_form(matches, team_name)
+        if not form:
+            # Try partial name match
+            team_lower = team_name.lower()
+            all_teams = set()
+            for m in matches:
+                all_teams.add(m.get("strHomeTeam", ""))
+                all_teams.add(m.get("strAwayTeam", ""))
+            match = next((t for t in all_teams if team_lower in t.lower() or t.lower() in team_lower), None)
+            if match:
+                form = compute_team_form(matches, match)
+
+        if not form:
+            return jsonify({"error": "Team not found", "team": team_name}), 404
+
+        result = {
+            "team": team_name,
+            "league": league["name"],
+            **form,
+        }
+        set_cached(cache_key, result)
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
