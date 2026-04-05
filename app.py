@@ -1,12 +1,14 @@
 """
-NBA Stats Proxy — serves real-time NBA player gamelogs to the betting dashboard.
-Uses nba_api to bypass NBA.com's bot protection (works from Python, blocked from browser).
-Deploy to Render free tier. Dashboard calls this instead of ESPN for NBA stats.
+NBA + NHL Stats Proxy — serves real-time player gamelogs to the betting dashboard.
+NBA: Uses nba_api to bypass NBA.com's bot protection.
+NHL: Proxies api-web.nhle.com to bypass CORS (no Access-Control-Allow-Origin on gamelog).
+Deploy to Render free tier.
 """
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players
+import requests as http_requests
 import time
 
 app = Flask(__name__)
@@ -229,6 +231,98 @@ def nba_player_stats(player_name):
         "latest_date": latest_date,
         "recent_values": recent5,
     })
+
+
+# ── NHL Endpoints ─────────────────────────────────────────────────────────────
+# Proxies api-web.nhle.com to bypass CORS (gamelog endpoint has no CORS headers)
+
+@app.route("/api/nhl/player/<player_name>/gamelog")
+def nhl_gamelog(player_name):
+    """
+    Returns recent gamelog for an NHL player.
+    Proxies: search.d3.nhle.com (player search) + api-web.nhle.com (gamelog)
+    """
+    cache_key = f"nhl_{player_name.lower()}"
+    cached = get_cached(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    try:
+        # Search for player by full name
+        search_res = http_requests.get(
+            f"https://search.d3.nhle.com/api/v1/search/player?culture=en-us&limit=5&q={player_name}",
+            timeout=10,
+        )
+        if search_res.status_code != 200:
+            return jsonify({"error": "NHL search failed"}), 502
+
+        players_list = search_res.json()
+        p_lower = player_name.lower()
+
+        # Match: exact name first, then first+last name both present
+        match = None
+        for p in players_list:
+            if (p.get("name") or "").lower() == p_lower:
+                match = p
+                break
+        if not match:
+            first = p_lower.split()[0] if " " in p_lower else ""
+            last = p_lower.split()[-1]
+            for p in players_list:
+                n = (p.get("name") or "").lower()
+                if last in n and first in n:
+                    match = p
+                    break
+
+        if not match:
+            return jsonify({"error": "Player not found", "player": player_name}), 404
+
+        player_id = match["playerId"]
+
+        # Fetch gamelog
+        gl_res = http_requests.get(
+            f"https://api-web.nhle.com/v1/player/{player_id}/game-log/20252026/2",
+            timeout=10,
+        )
+        if gl_res.status_code != 200:
+            return jsonify({"error": "NHL gamelog failed"}), 502
+
+        gl_data = gl_res.json()
+        game_log = gl_data.get("gameLog", [])
+
+        games = []
+        for g in game_log:
+            # Skip DNP
+            if g.get("toi") in ("00:00", "0:00", None):
+                continue
+            games.append({
+                "date": g.get("gameDate"),
+                "opponent": g.get("opponentAbbrev"),
+                "is_home": g.get("homeRoadFlag") == "H",
+                "goals": g.get("goals", 0),
+                "assists": g.get("assists", 0),
+                "points": g.get("points", 0),
+                "shots": g.get("shots", 0),
+                "pim": g.get("pim", 0),
+                "pp_goals": g.get("powerPlayGoals", 0),
+                "pp_points": g.get("powerPlayPoints", 0),
+                "toi": g.get("toi"),
+                "plus_minus": g.get("plusMinus", 0),
+            })
+
+        result = {
+            "player_id": player_id,
+            "player_name": match.get("name"),
+            "team": match.get("teamAbbrev"),
+            "games_count": len(games),
+            "games": games,
+        }
+
+        set_cached(cache_key, result)
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e), "player": player_name}), 500
 
 
 if __name__ == "__main__":
