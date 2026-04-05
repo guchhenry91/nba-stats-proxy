@@ -348,17 +348,22 @@ SOCCER_LEAGUES = {
 }
 
 
-def fetch_league_results(league_id, season, rounds_back=6):
+def fetch_league_results(league_id, season, rounds_back=4):
     """Fetch completed match results from recent rounds."""
     all_matches = []
-    # Find the latest round with completed games, then go back
+    found_any = False
+    misses = 0  # consecutive rounds with no data — stop early if too many
+
     for r in range(40, 0, -1):
         try:
             res = http_requests.get(
                 f"https://www.thesportsdb.com/api/v1/json/3/eventsround.php?id={league_id}&r={r}&s={season}",
-                timeout=8,
+                timeout=5,
             )
             if res.status_code != 200:
+                misses += 1
+                if found_any and misses > 3:
+                    break  # stop scanning if we already found data and hit 3 empty rounds
                 continue
             events = res.json().get("events") or []
             completed = [
@@ -368,9 +373,18 @@ def fetch_league_results(league_id, season, rounds_back=6):
             if completed:
                 all_matches.extend(completed)
                 rounds_back -= 1
+                found_any = True
+                misses = 0
                 if rounds_back <= 0:
                     break
+            else:
+                misses += 1
+                if found_any and misses > 3:
+                    break
         except Exception:
+            misses += 1
+            if found_any and misses > 3:
+                break
             continue
     return all_matches
 
