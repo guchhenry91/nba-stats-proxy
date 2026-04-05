@@ -1,4 +1,4 @@
 flask==3.1.1
 flask-cors==5.0.1
-nba_api==1.9.2
+nba_api==1.11.4
 gunicorn==23.0.0
