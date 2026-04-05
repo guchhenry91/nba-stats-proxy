@@ -459,5 +459,69 @@ def soccer_team_form(team_name):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/soccer/scorers/<league_key>")
+def soccer_scorers(league_key):
+    """
+    Returns top 50 scorers for a league with goals-per-game.
+    Uses ESPN statistics endpoint (works from Python, CORS OK but data is better aggregated here).
+    League keys: epl, laliga, ucl, fa_cup
+    """
+    espn_leagues = {
+        "epl": "eng.1", "laliga": "esp.1",
+        "ucl": "uefa.champions", "fa_cup": "eng.fa",
+    }
+    espn_id = espn_leagues.get(league_key)
+    if not espn_id:
+        return jsonify({"error": f"Unknown league: {league_key}"}), 400
+
+    cache_key = f"soccer_scorers_{league_key}"
+    cached = get_cached(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    try:
+        res = http_requests.get(
+            f"https://site.web.api.espn.com/apis/site/v2/sports/soccer/{espn_id}/statistics",
+            timeout=10,
+        )
+        if res.status_code != 200:
+            return jsonify({"error": "ESPN stats failed"}), 502
+
+        data = res.json()
+        stats = data.get("stats", [])
+        if not stats:
+            return jsonify({"error": "No scorer data"}), 404
+
+        goals_cat = stats[0]  # first category is always goals
+        leaders = goals_cat.get("leaders", [])
+
+        scorers = []
+        for l in leaders:
+            ath = l.get("athlete", {})
+            display = l.get("displayValue", "")
+            # Parse "Matches: 29, Goals: 22"
+            parts = {p.split(":")[0].strip(): p.split(":")[1].strip()
+                     for p in display.split(",") if ":" in p}
+            matches = int(parts.get("Matches", 0))
+            goals = int(parts.get("Goals", 0))
+            gpg = round(goals / matches, 3) if matches > 0 else 0
+
+            scorers.append({
+                "name": ath.get("displayName", ""),
+                "team": ath.get("team", {}).get("displayName", ""),
+                "id": ath.get("id"),
+                "matches": matches,
+                "goals": goals,
+                "goals_per_game": gpg,
+            })
+
+        result = {"league": league_key, "scorers_count": len(scorers), "scorers": scorers}
+        set_cached(cache_key, result)
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
