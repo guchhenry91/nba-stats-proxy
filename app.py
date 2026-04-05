@@ -9,6 +9,7 @@ from flask_cors import CORS
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players
 import requests as http_requests
+from understatapi import UnderstatClient
 import time
 
 app = Flask(__name__)
@@ -521,6 +522,132 @@ def soccer_scorers(league_key):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Soccer Player Stats (Understat) ──────────────────────────────────────────
+# Real xG, shots, xA, key passes for EPL + La Liga (500+ players per league)
+
+UNDERSTAT_LEAGUES = {
+    "epl": "EPL",
+    "laliga": "La_Liga",
+}
+
+
+@app.route("/api/soccer/players/<league_key>")
+def soccer_player_stats(league_key):
+    """
+    Returns all player stats for a league: xG, shots, xA, goals, assists, key passes.
+    League keys: epl, laliga
+    """
+    us_league = UNDERSTAT_LEAGUES.get(league_key)
+    if not us_league:
+        return jsonify({"error": f"Understat doesn't cover {league_key}. Only EPL and La Liga."}), 400
+
+    cache_key = f"understat_{league_key}"
+    cached = get_cached(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    try:
+        client = UnderstatClient()
+        players = client.league(league=us_league).get_player_data(season="2025")
+
+        player_list = []
+        for p in players:
+            games = int(p.get("games", 0))
+            if games < 3:
+                continue
+            goals = int(p.get("goals", 0))
+            shots = int(p.get("shots", 0))
+            xg = float(p.get("xG", 0))
+            xa = float(p.get("xA", 0))
+            key_passes = int(p.get("key_passes", 0))
+            assists = int(p.get("assists", 0))
+            mins = int(p.get("time", 0))
+
+            player_list.append({
+                "name": p.get("player_name", ""),
+                "team": p.get("team_title", ""),
+                "id": p.get("id"),
+                "games": games,
+                "goals": goals,
+                "shots": shots,
+                "xg": round(xg, 2),
+                "xa": round(xa, 2),
+                "assists": assists,
+                "key_passes": key_passes,
+                "minutes": mins,
+                "goals_per_game": round(goals / games, 3) if games else 0,
+                "shots_per_game": round(shots / games, 2) if games else 0,
+                "xg_per_game": round(xg / games, 3) if games else 0,
+                "xa_per_game": round(xa / games, 3) if games else 0,
+            })
+
+        player_list.sort(key=lambda x: x["goals"], reverse=True)
+
+        result = {
+            "league": league_key,
+            "season": "2025-26",
+            "players_count": len(player_list),
+            "players": player_list,
+        }
+
+        set_cached(cache_key, result)
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/soccer/player/<player_name>/stats")
+def soccer_player_detail(player_name):
+    """
+    Returns stats for a specific player across available leagues.
+    Searches EPL and La Liga.
+    """
+    cache_key = f"understat_player_{player_name.lower()}"
+    cached = get_cached(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    p_lower = player_name.lower()
+
+    for league_key, us_league in UNDERSTAT_LEAGUES.items():
+        try:
+            client = UnderstatClient()
+            players = client.league(league=us_league).get_player_data(season="2025")
+            match = None
+            for p in players:
+                n = (p.get("player_name") or "").lower()
+                if n == p_lower or (p_lower.split()[-1] in n and p_lower.split()[0] in n):
+                    match = p
+                    break
+
+            if match:
+                games = int(match.get("games", 0))
+                result = {
+                    "name": match.get("player_name"),
+                    "team": match.get("team_title"),
+                    "league": league_key,
+                    "games": games,
+                    "goals": int(match.get("goals", 0)),
+                    "shots": int(match.get("shots", 0)),
+                    "xg": round(float(match.get("xG", 0)), 2),
+                    "xa": round(float(match.get("xA", 0)), 2),
+                    "assists": int(match.get("assists", 0)),
+                    "key_passes": int(match.get("key_passes", 0)),
+                    "minutes": int(match.get("time", 0)),
+                    "goals_per_game": round(int(match.get("goals", 0)) / games, 3) if games else 0,
+                    "shots_per_game": round(int(match.get("shots", 0)) / games, 2) if games else 0,
+                    "xg_per_game": round(float(match.get("xG", 0)) / games, 3) if games else 0,
+                }
+                set_cached(cache_key, result)
+                return jsonify(result)
+
+        except Exception:
+            continue
+
+    return jsonify({"error": "Player not found", "player": player_name}), 404
 
 
 if __name__ == "__main__":
