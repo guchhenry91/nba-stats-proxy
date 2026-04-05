@@ -10,7 +10,16 @@ from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players
 import requests as http_requests
 from understatapi import UnderstatClient
+import unicodedata
 import time
+
+
+def strip_accents(s):
+    """Remove accents: Lafrenière → Lafreniere, Müller → Muller"""
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', s)
+        if unicodedata.category(c) != 'Mn'
+    )
 
 app = Flask(__name__)
 CORS(app)  # allow dashboard to call from any origin
@@ -258,19 +267,20 @@ def nhl_gamelog(player_name):
             return jsonify({"error": "NHL search failed"}), 502
 
         players_list = search_res.json()
-        p_lower = player_name.lower()
+        p_lower = strip_accents(player_name.lower())
 
-        # Match: exact name first, then first+last name both present
+        # Match: strip accents for comparison (Lafrenière vs Lafreniere)
         match = None
         for p in players_list:
-            if (p.get("name") or "").lower() == p_lower:
+            n = strip_accents((p.get("name") or "").lower())
+            if n == p_lower:
                 match = p
                 break
         if not match:
             first = p_lower.split()[0] if " " in p_lower else ""
             last = p_lower.split()[-1]
             for p in players_list:
-                n = (p.get("name") or "").lower()
+                n = strip_accents((p.get("name") or "").lower())
                 if last in n and first in n:
                     match = p
                     break
