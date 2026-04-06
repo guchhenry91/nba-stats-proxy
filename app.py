@@ -484,6 +484,124 @@ def soccer_team_form(team_name):
         return jsonify({"error": str(e)}), 500
 
 
+# ── Soccer Team xG (Understat) ───────────────────────────────────────────────
+# Independent team-level xG/xGA — the foundation for breaking odds dependency.
+# Covers: EPL, La Liga, Bundesliga, Serie A, Ligue 1
+
+UNDERSTAT_TEAM_LEAGUES = {
+    "epl": "EPL",
+    "laliga": "La_Liga",
+    "bundesliga": "Bundesliga",
+    "seriea": "Serie_A",
+    "ligue1": "Ligue_1",
+}
+
+
+@app.route("/api/soccer/team-xg/<league_key>")
+def soccer_team_xg(league_key):
+    """
+    Returns all teams' xG stats for a league — independent of bookmaker odds.
+    Each team gets: xG/game, xGA/game, npxG, npxGA, goals scored/conceded,
+    home and away splits, recent form (last 5 and last 10).
+    """
+    us_league = UNDERSTAT_TEAM_LEAGUES.get(league_key)
+    if not us_league:
+        return jsonify({"error": f"Understat doesn't cover {league_key}. Available: {list(UNDERSTAT_TEAM_LEAGUES.keys())}"}), 400
+
+    cache_key = f"team_xg_{league_key}"
+    cached = get_cached(cache_key)
+    if cached:
+        return jsonify(cached)
+
+    try:
+        client = UnderstatClient()
+        teams_data = client.league(league=us_league).get_team_data(season="2025")
+
+        teams = []
+        for team_name, team_info in teams_data.items():
+            history = team_info.get("history", [])
+            if not history:
+                continue
+
+            # Full season aggregates
+            total_xg = sum(float(m.get("xG", 0)) for m in history)
+            total_xga = sum(float(m.get("xGA", 0)) for m in history)
+            total_npxg = sum(float(m.get("npxG", 0)) for m in history)
+            total_npxga = sum(float(m.get("npxGA", 0)) for m in history)
+            total_scored = sum(int(m.get("scored", 0)) for m in history)
+            total_missed = sum(int(m.get("missed", 0)) for m in history)
+            n = len(history)
+
+            # Home/away splits
+            home_matches = [m for m in history if m.get("h_a") == "h"]
+            away_matches = [m for m in history if m.get("h_a") == "a"]
+
+            def avg_xg(matches):
+                if not matches:
+                    return None
+                return round(sum(float(m.get("xG", 0)) for m in matches) / len(matches), 3)
+
+            def avg_xga(matches):
+                if not matches:
+                    return None
+                return round(sum(float(m.get("xGA", 0)) for m in matches) / len(matches), 3)
+
+            # Recent form: last 5 and last 10 matches (sorted by date, newest last in history)
+            recent5 = history[-5:] if len(history) >= 5 else history
+            recent10 = history[-10:] if len(history) >= 10 else history
+
+            teams.append({
+                "team": team_name,
+                "games": n,
+                "xg_total": round(total_xg, 2),
+                "xga_total": round(total_xga, 2),
+                "xg_per_game": round(total_xg / n, 3),
+                "xga_per_game": round(total_xga / n, 3),
+                "npxg_per_game": round(total_npxg / n, 3),
+                "npxga_per_game": round(total_npxga / n, 3),
+                "goals_scored": total_scored,
+                "goals_conceded": total_missed,
+                "goals_per_game": round(total_scored / n, 3),
+                "goals_conceded_per_game": round(total_missed / n, 3),
+                # Home/away xG splits
+                "home_xg_per_game": avg_xg(home_matches),
+                "home_xga_per_game": avg_xga(home_matches),
+                "away_xg_per_game": avg_xg(away_matches),
+                "away_xga_per_game": avg_xga(away_matches),
+                "home_games": len(home_matches),
+                "away_games": len(away_matches),
+                # Recent form xG
+                "recent5_xg": round(sum(float(m.get("xG", 0)) for m in recent5) / len(recent5), 3),
+                "recent5_xga": round(sum(float(m.get("xGA", 0)) for m in recent5) / len(recent5), 3),
+                "recent10_xg": round(sum(float(m.get("xG", 0)) for m in recent10) / len(recent10), 3),
+                "recent10_xga": round(sum(float(m.get("xGA", 0)) for m in recent10) / len(recent10), 3),
+            })
+
+        # Sort by xG per game descending
+        teams.sort(key=lambda t: t["xg_per_game"], reverse=True)
+
+        # Compute league averages (needed for attack/defense strength calculation)
+        all_xg = [t["xg_per_game"] for t in teams]
+        all_xga = [t["xga_per_game"] for t in teams]
+        league_avg_xg = round(sum(all_xg) / len(all_xg), 3) if all_xg else 1.3
+        league_avg_xga = round(sum(all_xga) / len(all_xga), 3) if all_xga else 1.3
+
+        result = {
+            "league": league_key,
+            "season": "2025-26",
+            "teams_count": len(teams),
+            "league_avg_xg": league_avg_xg,
+            "league_avg_xga": league_avg_xga,
+            "teams": teams,
+        }
+
+        set_cached(cache_key, result)
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/soccer/scorers/<league_key>")
 def soccer_scorers(league_key):
     """
