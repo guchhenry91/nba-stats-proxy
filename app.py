@@ -514,11 +514,19 @@ def soccer_team_xg(league_key):
         return jsonify(cached)
 
     try:
-        client = UnderstatClient()
-        teams_data = client.league(league=us_league).get_team_data(season="2025")
+        with UnderstatClient() as client:
+            teams_data = client.league(league=us_league).get_team_data(season="2024")
 
         teams = []
-        for team_name, team_info in teams_data.items():
+        # Handle both dict format (old) and list format (new)
+        if isinstance(teams_data, list):
+            items = [(t.get("title") or t.get("team_name", f"Team_{i}"), t) for i, t in enumerate(teams_data)]
+        elif isinstance(teams_data, dict):
+            items = list(teams_data.items())
+        else:
+            return jsonify({"error": f"Unexpected data format: {type(teams_data).__name__}"}), 500
+
+        for team_name, team_info in items:
             history = team_info.get("history", [])
             if not history:
                 continue
@@ -691,8 +699,8 @@ def soccer_player_stats(league_key):
         return jsonify(cached)
 
     try:
-        client = UnderstatClient()
-        players = client.league(league=us_league).get_player_data(season="2025")
+        with UnderstatClient() as client:
+            players = client.league(league=us_league).get_player_data(season="2024")
 
         player_list = []
         for p in players:
