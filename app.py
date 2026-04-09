@@ -1245,5 +1245,139 @@ def soccer_player_detail(player_name):
     return jsonify({"error": "Player not found", "player": player_name}), 404
 
 
+# ── Statmuse FC — Soccer Player Game Log ─────────────────────────────────────
+# statmuse.com/fc uses /ask/{name-slug}-game-log-{season} — NO numeric ID needed.
+# Confirmed working for EPL, La Liga, UCL, Bundesliga, Serie A, Ligue 1 players.
+# Row format (confirmed from live HTML):
+#   [#, FullName, Date, Team, vs/@, Opp, Rating, MIN, G, A, xG, xA, PK, FK, SH, SOT, ...]
+#   cells[0]=# cells[2]=Date cells[3]=Team cells[4]=vs/@ cells[5]=Opp
+#   cells[6]=Rating cells[7]=MIN cells[8]=G cells[9]=A cells[10]=xG cells[11]=xA
+#   cells[14]=SH (total shots) cells[15]=SOT (shots on target)
+
+def _sm_soccer_name_to_slug(player_name):
+    """Convert 'Mohamed Salah' → 'mohamed-salah' for Statmuse FC URL."""
+    import unicodedata
+    # Strip accents: Mbappé → Mbappe, Müller → Muller
+    s = unicodedata.normalize('NFD', player_name)
+    s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+    # Lowercase, replace spaces/special chars with hyphens
+    s = s.lower().strip()
+    s = _re.sub(r"['\.]", '', s)   # remove apostrophes and dots
+    s = _re.sub(r'[^a-z0-9]+', '-', s)
+    s = s.strip('-')
+    return s
+
+
+@app.route("/api/soccer/player/<player_name>/gamelog/statmuse")
+def soccer_gamelog_statmuse(player_name):
+    """
+    Real-time soccer player game log from Statmuse FC (30-min cache).
+    Works for any player across EPL, La Liga, UCL, Bundesliga, Serie A, Ligue 1.
+    No slug map needed — name is converted directly to URL slug.
+
+    Response fields per game:
+      date, is_home, minutes, goals, assists, xg, xa, shots, shots_on_target
+    """
+    n_games = min(int(request.args.get("games", 10)), 20)
+    cache_key = f"statmuse_soccer_{player_name.lower()}"
+
+    if cache_key in _cache:
+        ts, data = _cache[cache_key]
+        if time.time() - ts < 1800:
+            return jsonify(data)
+
+    slug = _sm_soccer_name_to_slug(player_name)
+
+    try:
+        # Season 2025-26 → seasonYear param in URL text = "2025-26"
+        url = f"https://www.statmuse.com/fc/ask/{slug}-game-log-2025-26"
+        resp = http_requests.get(url, headers=STATMUSE_HEADERS, timeout=15)
+
+        # If that 404s try without season (gets current season)
+        if resp.status_code == 404:
+            url = f"https://www.statmuse.com/fc/ask/{slug}-game-log"
+            resp = http_requests.get(url, headers=STATMUSE_HEADERS, timeout=15)
+
+        if resp.status_code != 200:
+            return jsonify({"error": f"Statmuse FC {resp.status_code}", "player": player_name, "slug": slug}), 404
+
+        # Parse rows — soccer uses #/Name/Date format (cells[0] = game number)
+        row_pattern = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL)
+        cell_pattern = _re.compile(r'<td[^>]*>(.*?)</td>', _re.DOTALL)
+        tag_strip = _re.compile(r'<[^>]+>')
+
+        games = []
+        for m in row_pattern.finditer(resp.text):
+            cells = [tag_strip.sub('', c).strip() for c in cell_pattern.findall(m.group(1))]
+            cells = [c for c in cells if c]
+
+            # Soccer rows start with a game number (1, 2, 3...)
+            if len(cells) < 10:
+                continue
+            if not _re.match(r'^\d+$', cells[0]):
+                continue
+            # cells[4] must be vs or @
+            if cells[4] not in ('vs', '@'):
+                continue
+
+            mins = _safe_float(cells[7], 0, 120)
+            if mins is None or mins == 0:
+                continue  # skip DNP / red-carded off immediately
+
+            goals  = _safe_float(cells[8],  0, 10) or 0
+            assists = _safe_float(cells[9], 0, 10) or 0
+            xg     = _safe_float(cells[10], 0, 5)  or 0.0
+            xa     = _safe_float(cells[11], 0, 5)  or 0.0
+            shots  = _safe_float(cells[14], 0, 20) or 0 if len(cells) > 14 else 0
+            sot    = _safe_float(cells[15], 0, 15) or 0 if len(cells) > 15 else 0
+
+            games.append({
+                "date":            cells[2],
+                "team":            cells[3],
+                "is_home":         cells[4] == "vs",
+                "opponent":        cells[5],
+                "minutes":         mins,
+                "goals":           goals,
+                "assists":         assists,
+                "xg":              xg,
+                "xa":              xa,
+                "shots":           shots,
+                "shots_on_target": sot,
+            })
+            if len(games) >= n_games:
+                break
+
+        if not games:
+            return jsonify({
+                "error": "No rows parsed — player may not be on Statmuse FC",
+                "player": player_name,
+                "slug": slug,
+                "url_tried": url,
+            }), 404
+
+        # Compute season averages
+        n = len(games)
+        result = {
+            "player_name": player_name,
+            "source": "statmuse_fc",
+            "games_count": n,
+            "season": "2025-26",
+            "averages": {
+                "goals_per_game":   round(sum(g["goals"]   for g in games) / n, 3),
+                "assists_per_game": round(sum(g["assists"]  for g in games) / n, 3),
+                "xg_per_game":      round(sum(g["xg"]       for g in games) / n, 3),
+                "shots_per_game":   round(sum(g["shots"]    for g in games) / n, 2),
+                "sot_per_game":     round(sum(g["shots_on_target"] for g in games) / n, 2),
+            },
+            "games": games,
+        }
+
+        _cache[cache_key] = (time.time(), result)
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e), "player": player_name}), 500
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
