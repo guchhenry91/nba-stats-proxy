@@ -12,6 +12,7 @@ import requests as http_requests
 from understatapi import UnderstatClient
 import unicodedata
 import time
+import re as _re
 
 
 def strip_accents(s):
@@ -241,6 +242,248 @@ def nba_player_stats(player_name):
         "latest_date": latest_date,
         "recent_values": recent5,
     })
+
+
+# ── Statmuse NBA Game Log (real-time last-5) ──────────────────────────────────
+# Bypasses nba_api / NBA.com staleness by fetching directly from Statmuse SSR.
+# Statmuse serves real stat tables in server-rendered HTML — no JS needed.
+
+STATMUSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "https://www.statmuse.com/",
+}
+
+# Slug map — Statmuse uses player-name-ID format
+STATMUSE_SLUGS = {
+    "scottie barnes":            "scottie-barnes-30239",
+    "bam adebayo":               "bam-adebayo-4066",
+    "jalen brunson":             "jalen-brunson-9795",
+    "jayson tatum":              "jayson-tatum-9582",
+    "tyrese maxey":              "tyrese-maxey-30192",
+    "alperen sengun":            "alperen-sengun-30314",
+    "lebron james":              "lebron-james-1780",
+    "kevin durant":              "kevin-durant-985",
+    "pascal siakam":             "pascal-siakam-3059",
+    "nikola jokic":              "nikola-jokic-9226",
+    "shai gilgeous-alexander":   "shai-gilgeous-alexander-9773",
+    "jaylen brown":              "jaylen-brown-9390",
+    "anthony edwards":           "anthony-edwards-30191",
+    "luka doncic":               "luka-doncic-9988",
+    "victor wembanyama":         "victor-wembanyama-30249",
+    "cade cunningham":           "cade-cunningham-30241",
+    "donovan mitchell":          "donovan-mitchell-9695",
+    "karl-anthony towns":        "karl-anthony-towns-3059",
+    "devin booker":              "devin-booker-9502",
+    "trae young":                "trae-young-9988",
+    "giannis antetokounmpo":     "giannis-antetokounmpo-3032",
+    "stephen curry":             "stephen-curry-791",
+    "joel embiid":               "joel-embiid-3157",
+    "damian lillard":            "damian-lillard-2571",
+    "jimmy butler":              "jimmy-butler-2619",
+    "zion williamson":           "zion-williamson-30099",
+    "ja morant":                 "ja-morant-30107",
+    "darius garland":            "darius-garland-30101",
+    "evan mobley":               "evan-mobley-30237",
+    "jarrett allen":             "jarrett-allen-9611",
+    "paul george":               "paul-george-1621",
+    "kawhi leonard":             "kawhi-leonard-2001",
+    "james harden":              "james-harden-686",
+    "kyrie irving":              "kyrie-irving-1677",
+    "russell westbrook":         "russell-westbrook-706",
+    "chris paul":                "chris-paul-383",
+    "lamelo ball":               "lamelo-ball-30199",
+    "miles bridges":             "miles-bridges-9711",
+    "brandon miller":            "brandon-miller-30250",
+    "paolo banchero":            "paolo-banchero-30244",
+    "franz wagner":              "franz-wagner-30233",
+    "jalen suggs":               "jalen-suggs-30238",
+    "dejounte murray":           "dejounte-murray-4061",
+    "trae young":                "trae-young-9988",
+    "onyeka okongwu":            "onyeka-okongwu-30195",
+    "clint capela":              "clint-capela-3074",
+    "nikola vucevic":            "nikola-vucevic-2011",
+    "domantas sabonis":          "domantas-sabonis-3940",
+    "de'aaron fox":              "deaaron-fox-9575",
+    "keegan murray":             "keegan-murray-30243",
+    "andrew wiggins":            "andrew-wiggins-3073",
+    "draymond green":            "draymond-green-2561",
+    "klay thompson":             "klay-thompson-1470",
+    "bam adebayo":               "bam-adebayo-4066",
+    "tyler herro":               "tyler-herro-30100",
+    "terry rozier":              "terry-rozier-3938",
+    "jrue holiday":              "jrue-holiday-1424",
+    "kristaps porzingis":        "kristaps-porzingis-3898",
+    "al horford":                "al-horford-370",
+    "derrick white":             "derrick-white-9578",
+    "payton pritchard":          "payton-pritchard-30181",
+    "julius randle":             "julius-randle-3151",
+    "og anunoby":                "og-anunoby-9699",
+    "mikal bridges":             "mikal-bridges-9713",
+    "josh hart":                 "josh-hart-9576",
+    "donte divincenzo":          "donte-divincenzo-9714",
+    "zach lavine":               "zach-lavine-3147",
+    "coby white":                "coby-white-30102",
+    "nikola jokic":              "nikola-jokic-9226",
+    "michael porter jr":         "michael-porter-jr-9741",
+    "jamal murray":              "jamal-murray-9412",
+    "aaron gordon":              "aaron-gordon-3150",
+    "anfernee simons":           "anfernee-simons-9748",
+    "scoot henderson":           "scoot-henderson-30251",
+    "shaedon sharpe":            "shaedon-sharpe-30245",
+    "jerami grant":              "jerami-grant-3153",
+    "fred vanvleet":             "fred-vanvleet-9413",
+    "immanuel quickley":         "immanuel-quickley-30190",
+    "rj barrett":                "rj-barrett-30103",
+    "cam thomas":                "cam-thomas-30240",
+    "ben simmons":               "ben-simmons-4052",
+    "dennis schroder":           "dennis-schroder-2692",
+    "austin reaves":             "austin-reaves-30223",
+    "d'angelo russell":          "dangelo-russell-3886",
+    "anthony davis":             "anthony-davis-2440",
+}
+
+
+def parse_statmuse_gamelog(html_text):
+    """
+    Parse Statmuse SSR game log page.
+    Stats are embedded in the rendered HTML as text in table cells.
+    Returns dict of lists: pts, reb, ast, stl, blk (newest-first)
+    """
+    games = {"pts": [], "reb": [], "ast": [], "stl": [], "blk": []}
+
+    # Extract summary line (e.g. "averaged 12.8 points, 8.2 assists...")
+    summary = ""
+    summary_match = _re.search(r"averaged (.+?) in \d+ games", html_text)
+    if summary_match:
+        summary = summary_match.group(0)
+
+    # Extract stat rows from HTML table — look for <td> values in game log table
+    # Each row contains: G, Date, Opponent, Result, MIN, PTS, REB, AST, STL, BLK, ...
+    row_pattern = _re.compile(
+        r'<tr[^>]*>.*?</tr>', _re.DOTALL
+    )
+    cell_pattern = _re.compile(r'<td[^>]*>(.*?)</td>', _re.DOTALL)
+    tag_strip = _re.compile(r'<[^>]+>')
+
+    for row_match in row_pattern.finditer(html_text):
+        row = row_match.group(0)
+        cells = [tag_strip.sub('', c).strip() for c in cell_pattern.findall(row)]
+        # Need at least 10 columns: G Date Opp Result MIN PTS REB AST STL BLK
+        if len(cells) < 10:
+            continue
+        # First cell should be a game number
+        try:
+            int(cells[0])
+        except (ValueError, IndexError):
+            continue
+        # MIN is cells[4], validate it's a plausible minutes value
+        try:
+            mins = float(cells[4])
+            if not (0 < mins <= 50):
+                continue
+            pts  = float(cells[5])
+            reb  = float(cells[6])
+            ast  = float(cells[7])
+            stl  = float(cells[8])
+            blk  = float(cells[9])
+        except (ValueError, IndexError):
+            continue
+
+        if 0 <= pts <= 80:  games["pts"].append(pts)
+        if 0 <= reb <= 30:  games["reb"].append(reb)
+        if 0 <= ast <= 25:  games["ast"].append(ast)
+        if 0 <= stl <= 10:  games["stl"].append(stl)
+        if 0 <= blk <= 10:  games["blk"].append(blk)
+
+    games["summary"] = summary
+    return games
+
+
+@app.route("/api/nba/player/<player_name>/gamelog/statmuse")
+def nba_gamelog_statmuse(player_name):
+    """
+    Returns real-time last-N game log from Statmuse SSR.
+    Fresher than nba_api — updates within hours of game end.
+    Response mirrors /gamelog format so frontend swaps sources transparently.
+    Query params: games (default 5, max 10)
+    """
+    n_games = min(int(request.args.get("games", 5)), 10)
+    cache_key = f"statmuse_{player_name.lower()}"
+
+    # 30-minute TTL — much shorter than nba_api's 2h so stats stay fresh
+    if cache_key in _cache:
+        ts, data = _cache[cache_key]
+        if time.time() - ts < 1800:
+            return jsonify(data)
+
+    # Slug lookup — exact then partial
+    slug = STATMUSE_SLUGS.get(player_name.lower())
+    if not slug:
+        p_lower = player_name.lower()
+        for key, val in STATMUSE_SLUGS.items():
+            if p_lower in key or key in p_lower:
+                slug = val
+                break
+
+    if not slug:
+        return jsonify({
+            "error": "Player slug not found. Add to STATMUSE_SLUGS in app.py.",
+            "player": player_name,
+            "available": sorted(STATMUSE_SLUGS.keys()),
+        }), 404
+
+    try:
+        url = f"https://www.statmuse.com/nba/player/{slug}/game-log?seasonYear=2026"
+        resp = http_requests.get(url, headers=STATMUSE_HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return jsonify({"error": f"Statmuse returned {resp.status_code}"}), 502
+
+        games_data = parse_statmuse_gamelog(resp.text)
+
+        pts_list = games_data["pts"][:n_games]
+        reb_list = games_data["reb"][:n_games]
+        ast_list = games_data["ast"][:n_games]
+        stl_list = games_data["stl"][:n_games]
+        blk_list = games_data["blk"][:n_games]
+
+        n = len(pts_list)
+        if n == 0:
+            return jsonify({"error": "No game data parsed from Statmuse page"}), 500
+
+        games = []
+        for i in range(n):
+            games.append({
+                "pts": pts_list[i] if i < len(pts_list) else 0,
+                "reb": reb_list[i] if i < len(reb_list) else 0,
+                "ast": ast_list[i] if i < len(ast_list) else 0,
+                "stl": stl_list[i] if i < len(stl_list) else 0,
+                "blk": blk_list[i] if i < len(blk_list) else 0,
+                "min": None,
+                "is_home": None,
+            })
+
+        avgs = {
+            "avg_pts": round(sum(pts_list) / len(pts_list), 1) if pts_list else 0,
+            "avg_reb": round(sum(reb_list) / len(reb_list), 1) if reb_list else 0,
+            "avg_ast": round(sum(ast_list) / len(ast_list), 1) if ast_list else 0,
+        }
+
+        result = {
+            "player_name": player_name,
+            "source": "statmuse",
+            "games_count": n,
+            "summary": games_data.get("summary", ""),
+            "averages": avgs,
+            "games": games,
+        }
+
+        _cache[cache_key] = (time.time(), result)
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e), "player": player_name}), 500
 
 
 # ── NHL Endpoints ─────────────────────────────────────────────────────────────
