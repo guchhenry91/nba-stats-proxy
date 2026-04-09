@@ -244,9 +244,13 @@ def nba_player_stats(player_name):
     })
 
 
-# ── Statmuse NBA Game Log (real-time last-5) ──────────────────────────────────
-# Bypasses nba_api / NBA.com staleness by fetching directly from Statmuse SSR.
-# Statmuse serves real stat tables in server-rendered HTML — no JS needed.
+# ── Statmuse Game Logs (NBA / NHL / MLB) — real-time SSR scraping ─────────────
+# Statmuse serves fully rendered HTML with stat tables at 200 from raw requests.
+# Confirmed working: NBA ✅  NHL ✅  MLB ✅  (tested locally Apr 2026)
+# Row format (confirmed from live HTML):
+#   NBA: [Date, Team, vs/@, Opp, Result, MIN, PTS, REB, AST, STL, BLK, FG3M, ...]
+#   NHL: [Date, Team, vs/@, Opp, Result, G,   A,   PTS, +/-, SOG, PIM, TOI,  ...]
+#   MLB: [Date, Team, vs/@, Opp, Result, AB,  R,   H,   HR,  RBI, BB,  K,    ...]
 
 STATMUSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -345,80 +349,63 @@ STATMUSE_SLUGS = {
 }
 
 
-def parse_statmuse_gamelog(html_text):
+_SM_ROW = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL)
+_SM_CELL = _re.compile(r'<td[^>]*>(.*?)</td>', _re.DOTALL)
+_SM_TAG = _re.compile(r'<[^>]+>')
+
+def _sm_parse_rows(html_text):
     """
-    Parse Statmuse SSR game log page.
-    Stats are embedded in the rendered HTML as text in table cells.
-    Returns dict of lists: pts, reb, ast, stl, blk (newest-first)
+    Parse all <tr> rows from Statmuse HTML, return list of cell-value lists.
+    Skips header rows, Average rows, and rows with fewer than 8 cells.
+    Confirmed row format for all sports:
+      cells[0] = Date  (e.g. "Sun 4/9")
+      cells[1] = Team  (e.g. "WAS")
+      cells[2] = vs/@
+      cells[3] = Opp
+      cells[4] = Result (e.g. "W 114-108")
+      cells[5..] = stats (sport-specific)
     """
-    games = {"pts": [], "reb": [], "ast": [], "stl": [], "blk": []}
-
-    # Extract summary line (e.g. "averaged 12.8 points, 8.2 assists...")
-    summary = ""
-    summary_match = _re.search(r"averaged (.+?) in \d+ games", html_text)
-    if summary_match:
-        summary = summary_match.group(0)
-
-    # Extract stat rows from HTML table — look for <td> values in game log table
-    # Each row contains: G, Date, Opponent, Result, MIN, PTS, REB, AST, STL, BLK, ...
-    row_pattern = _re.compile(
-        r'<tr[^>]*>.*?</tr>', _re.DOTALL
-    )
-    cell_pattern = _re.compile(r'<td[^>]*>(.*?)</td>', _re.DOTALL)
-    tag_strip = _re.compile(r'<[^>]+>')
-
-    for row_match in row_pattern.finditer(html_text):
-        row = row_match.group(0)
-        cells = [tag_strip.sub('', c).strip() for c in cell_pattern.findall(row)]
-        # Need at least 10 columns: G Date Opp Result MIN PTS REB AST STL BLK
-        if len(cells) < 10:
+    rows = []
+    for m in _SM_ROW.finditer(html_text):
+        cells = [_SM_TAG.sub('', c).strip() for c in _SM_CELL.findall(m.group(1))]
+        cells = [c for c in cells if c]
+        if len(cells) < 8:
             continue
-        # First cell should be a game number
-        try:
-            int(cells[0])
-        except (ValueError, IndexError):
+        # Skip header rows and Average/Total rows
+        if cells[0] in ('Average', 'Total', 'G', 'Date', '#'):
             continue
-        # MIN is cells[4], validate it's a plausible minutes value
-        try:
-            mins = float(cells[4])
-            if not (0 < mins <= 50):
-                continue
-            pts  = float(cells[5])
-            reb  = float(cells[6])
-            ast  = float(cells[7])
-            stl  = float(cells[8])
-            blk  = float(cells[9])
-        except (ValueError, IndexError):
+        # First cell must look like a date: "Mon 4/7", "Sat 3/22" etc.
+        if not _re.match(r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d', cells[0]):
             continue
+        # cells[2] must be "vs" or "@"
+        if cells[2] not in ('vs', '@'):
+            continue
+        rows.append(cells)
+    return rows
 
-        if 0 <= pts <= 80:  games["pts"].append(pts)
-        if 0 <= reb <= 30:  games["reb"].append(reb)
-        if 0 <= ast <= 25:  games["ast"].append(ast)
-        if 0 <= stl <= 10:  games["stl"].append(stl)
-        if 0 <= blk <= 10:  games["blk"].append(blk)
 
-    games["summary"] = summary
-    return games
+def _safe_float(val, lo, hi):
+    try:
+        v = float(val)
+        return v if lo <= v <= hi else None
+    except (ValueError, TypeError):
+        return None
 
 
 @app.route("/api/nba/player/<player_name>/gamelog/statmuse")
 def nba_gamelog_statmuse(player_name):
     """
-    Returns real-time last-N game log from Statmuse SSR.
-    Fresher than nba_api — updates within hours of game end.
-    Response mirrors /gamelog format so frontend swaps sources transparently.
-    Query params: games (default 5, max 10)
+    Real-time NBA game log from Statmuse SSR (30-min cache).
+    Row format: [Date, Team, vs/@, Opp, Result, MIN, PTS, REB, AST, STL, BLK, FG3M, ...]
+    Falls back: frontend uses /gamelog (nba_api) if 404 returned.
     """
-    n_games = min(int(request.args.get("games", 5)), 10)
-    cache_key = f"statmuse_{player_name.lower()}"
-
-    # 30-minute TTL — much shorter than nba_api's 2h so stats stay fresh
+    n_games = min(int(request.args.get("games", 10)), 20)
+    cache_key = f"statmuse_nba_{player_name.lower()}"
     if cache_key in _cache:
         ts, data = _cache[cache_key]
         if time.time() - ts < 1800:
             return jsonify(data)
 
-    # Slug lookup — exact then partial
     slug = STATMUSE_SLUGS.get(player_name.lower())
     if not slug:
         p_lower = player_name.lower()
@@ -426,62 +413,277 @@ def nba_gamelog_statmuse(player_name):
             if p_lower in key or key in p_lower:
                 slug = val
                 break
-
     if not slug:
-        return jsonify({
-            "error": "Player slug not found. Add to STATMUSE_SLUGS in app.py.",
-            "player": player_name,
-            "available": sorted(STATMUSE_SLUGS.keys()),
-        }), 404
+        return jsonify({"error": "slug_not_found", "player": player_name}), 404
 
     try:
-        url = f"https://www.statmuse.com/nba/player/{slug}/game-log?seasonYear=2026"
-        resp = http_requests.get(url, headers=STATMUSE_HEADERS, timeout=15)
+        resp = http_requests.get(
+            f"https://www.statmuse.com/nba/player/{slug}/game-log?seasonYear=2026",
+            headers=STATMUSE_HEADERS, timeout=15
+        )
         if resp.status_code != 200:
-            return jsonify({"error": f"Statmuse returned {resp.status_code}"}), 502
-
-        games_data = parse_statmuse_gamelog(resp.text)
-
-        pts_list = games_data["pts"][:n_games]
-        reb_list = games_data["reb"][:n_games]
-        ast_list = games_data["ast"][:n_games]
-        stl_list = games_data["stl"][:n_games]
-        blk_list = games_data["blk"][:n_games]
-
-        n = len(pts_list)
-        if n == 0:
-            return jsonify({"error": "No game data parsed from Statmuse page"}), 500
+            return jsonify({"error": f"Statmuse {resp.status_code}"}), 502
 
         games = []
-        for i in range(n):
+        for cells in _sm_parse_rows(resp.text):
+            # cells[5]=MIN, [6]=PTS, [7]=REB, [8]=AST, [9]=STL, [10]=BLK, [11]=FG3M
+            mins = _safe_float(cells[5], 0, 50)
+            if mins is None or mins == 0:
+                continue  # skip DNP
             games.append({
-                "pts": pts_list[i] if i < len(pts_list) else 0,
-                "reb": reb_list[i] if i < len(reb_list) else 0,
-                "ast": ast_list[i] if i < len(ast_list) else 0,
-                "stl": stl_list[i] if i < len(stl_list) else 0,
-                "blk": blk_list[i] if i < len(blk_list) else 0,
-                "min": None,
-                "is_home": None,
+                "date":     cells[0],
+                "is_home":  cells[2] == "vs",
+                "min":      mins,
+                "pts":      _safe_float(cells[6],  0, 80) or 0,
+                "reb":      _safe_float(cells[7],  0, 30) or 0,
+                "ast":      _safe_float(cells[8],  0, 25) or 0,
+                "stl":      _safe_float(cells[9],  0, 10) or 0,
+                "blk":      _safe_float(cells[10], 0, 10) or 0,
+                "fg3m":     _safe_float(cells[11], 0, 15) or 0 if len(cells) > 11 else 0,
             })
+            if len(games) >= n_games:
+                break
 
-        avgs = {
-            "avg_pts": round(sum(pts_list) / len(pts_list), 1) if pts_list else 0,
-            "avg_reb": round(sum(reb_list) / len(reb_list), 1) if reb_list else 0,
-            "avg_ast": round(sum(ast_list) / len(ast_list), 1) if ast_list else 0,
-        }
+        if not games:
+            return jsonify({"error": "No rows parsed", "player": player_name}), 500
 
         result = {
-            "player_name": player_name,
-            "source": "statmuse",
-            "games_count": n,
-            "summary": games_data.get("summary", ""),
-            "averages": avgs,
-            "games": games,
+            "player_name": player_name, "source": "statmuse",
+            "games_count": len(games), "games": games,
         }
-
         _cache[cache_key] = (time.time(), result)
         return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "player": player_name}), 500
 
+
+# ── NHL slug map ──────────────────────────────────────────────────────────────
+STATMUSE_NHL_SLUGS = {
+    "nathan mackinnon":      "nathan-mackinnon-1890",
+    "leon draisaitl":        "leon-draisaitl-3049",
+    "connor mcdavid":        "connor-mcdavid-3114",
+    "matthew tkachuk":       "matthew-tkachuk-3936",
+    "david pastrnak":        "david-pastrnak-2755",
+    "auston matthews":       "auston-matthews-3977",
+    "mitch marner":          "mitch-marner-3979",
+    "mikko rantanen":        "mikko-rantanen-3975",
+    "kirill kaprizov":       "kirill-kaprizov-30143",
+    "cale makar":            "cale-makar-30083",
+    "roman josi":            "roman-josi-1940",
+    "victor hedman":         "victor-hedman-1522",
+    "brayden point":         "brayden-point-3944",
+    "nikita kucherov":       "nikita-kucherov-2519",
+    "andrei vasilevskiy":    "andrei-vasilevskiy-2763",
+    "sam reinhart":          "sam-reinhart-2843",
+    "jake guentzel":         "jake-guentzel-3105",
+    "mark scheifele":        "mark-scheifele-2067",
+    "kyle connor":           "kyle-connor-4011",
+    "sean monahan":          "sean-monahan-2625",
+    "elias pettersson":      "elias-pettersson-30059",
+    "j.t. miller":           "jt-miller-2605",
+    "brady tkachuk":         "brady-tkachuk-30080",
+    "tim stutzle":           "tim-stutzle-30197",
+    "josh norris":           "josh-norris-30133",
+    "claude giroux":         "claude-giroux-1264",
+    "trevor zegras":         "trevor-zegras-30179",
+    "mason mctavish":        "mason-mctavish-30248",
+    "troy terry":            "troy-terry-30044",
+    "frank vatrano":         "frank-vatrano-3937",
+    "tage thompson":         "tage-thompson-30050",
+    "rasmus dahlin":         "rasmus-dahlin-30069",
+    "quinn hughes":          "quinn-hughes-30099",
+    "adam fox":              "adam-fox-30105",
+    "miro heiskanen":        "miro-heiskanen-30064",
+    "jonathan huberdeau":    "jonathan-huberdeau-2427",
+    "aleksander barkov":     "aleksander-barkov-2806",
+    "jack eichel":           "jack-eichel-3001",
+    "mark stone":            "mark-stone-2218",
+    "anze kopitar":          "anze-kopitar-643",
+    "drew doughty":          "drew-doughty-1156",
+    "gabriel landeskog":     "gabriel-landeskog-1936",
+    "evgeni malkin":         "evgeni-malkin-521",
+    "sidney crosby":         "sidney-crosby-435",
+    "alex ovechkin":         "alex-ovechkin-418",
+}
+
+
+@app.route("/api/nhl/player/<player_name>/gamelog/statmuse")
+def nhl_gamelog_statmuse(player_name):
+    """
+    Real-time NHL game log from Statmuse SSR (30-min cache).
+    Row format: [Date, Team, vs/@, Opp, Result, G, A, PTS, +/-, SOG, PIM, TOI, ...]
+    """
+    n_games = min(int(request.args.get("games", 10)), 20)
+    cache_key = f"statmuse_nhl_{player_name.lower()}"
+    if cache_key in _cache:
+        ts, data = _cache[cache_key]
+        if time.time() - ts < 1800:
+            return jsonify(data)
+
+    slug = STATMUSE_NHL_SLUGS.get(player_name.lower())
+    if not slug:
+        p_lower = player_name.lower()
+        for key, val in STATMUSE_NHL_SLUGS.items():
+            if p_lower in key or key in p_lower:
+                slug = val
+                break
+    if not slug:
+        return jsonify({"error": "slug_not_found", "player": player_name}), 404
+
+    try:
+        resp = http_requests.get(
+            f"https://www.statmuse.com/nhl/player/{slug}/game-log?seasonYear=2026",
+            headers=STATMUSE_HEADERS, timeout=15
+        )
+        if resp.status_code != 200:
+            return jsonify({"error": f"Statmuse {resp.status_code}"}), 502
+
+        games = []
+        for cells in _sm_parse_rows(resp.text):
+            # cells[5]=G, [6]=A, [7]=PTS, [8]=+/-, [9]=SOG, [10]=PIM, [11]=TOI
+            games.append({
+                "date":     cells[0],
+                "is_home":  cells[2] == "vs",
+                "goals":    _safe_float(cells[5],  0, 10) or 0,
+                "assists":  _safe_float(cells[6],  0, 10) or 0,
+                "points":   _safe_float(cells[7],  0, 10) or 0,
+                "shots":    _safe_float(cells[9],  0, 20) or 0,
+                "pim":      _safe_float(cells[10], 0, 50) or 0 if len(cells) > 10 else 0,
+                "toi":      cells[11] if len(cells) > 11 else None,
+                "blocked_shots": 0,  # not in Statmuse table
+                "pp_goals": 0,
+                "pp_points": 0,
+            })
+            if len(games) >= n_games:
+                break
+
+        if not games:
+            return jsonify({"error": "No rows parsed", "player": player_name}), 500
+
+        result = {
+            "player_name": player_name, "source": "statmuse",
+            "games_count": len(games), "games": games,
+        }
+        _cache[cache_key] = (time.time(), result)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "player": player_name}), 500
+
+
+# ── MLB slug map ──────────────────────────────────────────────────────────────
+STATMUSE_MLB_SLUGS = {
+    "shohei ohtani":         "shohei-ohtani-12592",
+    "freddie freeman":       "freddie-freeman-6418",
+    "mookie betts":          "mookie-betts-7578",
+    "juan soto":             "juan-soto-13865",
+    "aaron judge":           "aaron-judge-10309",
+    "pete alonso":           "pete-alonso-14069",
+    "bryce harper":          "bryce-harper-5680",
+    "trea turner":           "trea-turner-9886",
+    "austin riley":          "austin-riley-14144",
+    "yordan alvarez":        "yordan-alvarez-14302",
+    "jose abreu":            "jose-abreu-6929",
+    "mike trout":            "mike-trout-5765",
+    "paul goldschmidt":      "paul-goldschmidt-5685",
+    "nolan arenado":         "nolan-arenado-5790",
+    "ronald acuna jr":       "ronald-acuna-jr-13907",
+    "cody bellinger":        "cody-bellinger-10265",
+    "corey seager":          "corey-seager-9874",
+    "marcus semien":         "marcus-semien-6590",
+    "bo bichette":           "bo-bichette-14318",
+    "vladimir guerrero jr":  "vladimir-guerrero-jr-14049",
+    "jose ramirez":          "jose-ramirez-8077",
+    "bobby witt jr":         "bobby-witt-jr-15540",
+    "julio rodriguez":       "julio-rodriguez-16225",
+    "gunnar henderson":      "gunnar-henderson-16523",
+    "corbin carroll":        "corbin-carroll-16278",
+    "jackson holliday":      "jackson-holliday-16857",
+    "adley rutschman":       "adley-rutschman-15818",
+    "will smith":            "will-smith-13911",
+    "kyle tucker":           "kyle-tucker-12577",
+    "yordan alvarez":        "yordan-alvarez-14302",
+    "gerrit cole":           "gerrit-cole-7569",
+    "zack wheeler":          "zack-wheeler-7000",
+    "sandy alcantara":       "sandy-alcantara-13280",
+    "spencer strider":       "spencer-strider-16071",
+    "corbin burnes":         "corbin-burnes-13870",
+    "max scherzer":          "max-scherzer-5234",
+    "justin verlander":      "justin-verlander-3388",
+    "jacob degrom":          "jacob-degrom-8210",
+    "blake snell":           "blake-snell-10145",
+    "yoshinobu yamamoto":    "yoshinobu-yamamoto-17494",
+    "paul skenes":           "paul-skenes-17662",
+}
+
+
+@app.route("/api/mlb/player/<player_name>/gamelog/statmuse")
+def mlb_gamelog_statmuse(player_name):
+    """
+    Real-time MLB game log from Statmuse SSR (30-min cache).
+    Row format: [Date, Team, vs/@, Opp, Result, AB, R, H, HR, RBI, BB, K, ...]
+    """
+    n_games = min(int(request.args.get("games", 10)), 20)
+    cache_key = f"statmuse_mlb_{player_name.lower()}"
+    if cache_key in _cache:
+        ts, data = _cache[cache_key]
+        if time.time() - ts < 1800:
+            return jsonify(data)
+
+    slug = STATMUSE_MLB_SLUGS.get(player_name.lower())
+    if not slug:
+        p_lower = player_name.lower()
+        for key, val in STATMUSE_MLB_SLUGS.items():
+            if p_lower in key or key in p_lower:
+                slug = val
+                break
+    if not slug:
+        return jsonify({"error": "slug_not_found", "player": player_name}), 404
+
+    try:
+        resp = http_requests.get(
+            f"https://www.statmuse.com/mlb/player/{slug}/game-log?seasonYear=2025",
+            headers=STATMUSE_HEADERS, timeout=15
+        )
+        if resp.status_code != 200:
+            return jsonify({"error": f"Statmuse {resp.status_code}"}), 502
+
+        games = []
+        for cells in _sm_parse_rows(resp.text):
+            # cells[5]=AB, [6]=R, [7]=H, [8]=HR, [9]=RBI, [10]=BB, [11]=K
+            ab = _safe_float(cells[5], 0, 10)
+            if ab is None:
+                continue
+            hits  = _safe_float(cells[7],  0, 7) or 0
+            hr    = _safe_float(cells[8],  0, 5) or 0
+            rbi   = _safe_float(cells[9],  0, 15) or 0
+            bb    = _safe_float(cells[10], 0, 6) or 0
+            k     = _safe_float(cells[11], 0, 6) or 0 if len(cells) > 11 else 0
+            games.append({
+                "date":     cells[0],
+                "is_home":  cells[2] == "vs",
+                "ab":       ab or 0,
+                "runs":     _safe_float(cells[6], 0, 6) or 0,
+                "hits":     hits,
+                "homeRuns": hr,
+                "RBIs":     rbi,
+                "walks":    bb,
+                "strikeouts": k,
+                # Derived composites
+                "totalBases":    hits + hr * 3,  # approximate (no 2B/3B from Statmuse)
+                "hitsRunsRBIs":  hits + (_safe_float(cells[6], 0, 6) or 0) + rbi,
+            })
+            if len(games) >= n_games:
+                break
+
+        if not games:
+            return jsonify({"error": "No rows parsed", "player": player_name}), 500
+
+        result = {
+            "player_name": player_name, "source": "statmuse",
+            "games_count": len(games), "games": games,
+        }
+        _cache[cache_key] = (time.time(), result)
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "player": player_name}), 500
 
