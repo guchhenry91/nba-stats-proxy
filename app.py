@@ -13,6 +13,7 @@ from understatapi import UnderstatClient
 import unicodedata
 import time
 import re as _re
+import os
 
 
 def strip_accents(s):
@@ -45,6 +46,19 @@ def set_cached(key, data):
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "cache_size": len(_cache)})
+
+
+@app.route("/api/config")
+def config():
+    """
+    Returns public config for the betting dashboard.
+    The odds API key is stored as a Render environment variable (ODDS_API_KEY)
+    so it never needs to be hardcoded in the frontend.
+    """
+    key = os.environ.get("ODDS_API_KEY", "")
+    if not key:
+        return jsonify({"error": "ODDS_API_KEY not configured"}), 500
+    return jsonify({"oddsKey": key})
 
 
 @app.route("/api/nba/player/<player_name>/gamelog")
