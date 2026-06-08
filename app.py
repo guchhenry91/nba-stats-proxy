@@ -318,7 +318,6 @@ STATMUSE_SLUGS = {
     "franz wagner":              "franz-wagner-30233",
     "jalen suggs":               "jalen-suggs-30238",
     "dejounte murray":           "dejounte-murray-4061",
-    "trae young":                "trae-young-9988",
     "onyeka okongwu":            "onyeka-okongwu-30195",
     "clint capela":              "clint-capela-3074",
     "nikola vucevic":            "nikola-vucevic-2011",
@@ -328,7 +327,6 @@ STATMUSE_SLUGS = {
     "andrew wiggins":            "andrew-wiggins-3073",
     "draymond green":            "draymond-green-2561",
     "klay thompson":             "klay-thompson-1470",
-    "bam adebayo":               "bam-adebayo-4066",
     "tyler herro":               "tyler-herro-30100",
     "terry rozier":              "terry-rozier-3938",
     "jrue holiday":              "jrue-holiday-1424",
@@ -343,7 +341,6 @@ STATMUSE_SLUGS = {
     "donte divincenzo":          "donte-divincenzo-9714",
     "zach lavine":               "zach-lavine-3147",
     "coby white":                "coby-white-30102",
-    "nikola jokic":              "nikola-jokic-9226",
     "michael porter jr":         "michael-porter-jr-9741",
     "jamal murray":              "jamal-murray-9412",
     "aaron gordon":              "aaron-gordon-3150",
@@ -555,15 +552,22 @@ def nhl_gamelog_statmuse(player_name):
         games = []
         for cells in _sm_parse_rows(resp.text):
             # cells[5]=G, [6]=A, [7]=PTS, [8]=+/-, [9]=SOG, [10]=PIM, [11]=TOI
+            goals   = _safe_float(cells[5],  0, 10) or 0
+            assists = _safe_float(cells[6],  0, 10) or 0
+            shots   = _safe_float(cells[9],  0, 20) or 0
+            toi     = cells[11] if len(cells) > 11 else None
+            # Skip DNP rows — scratched/injured players show 0 across all stats
+            if goals == 0 and assists == 0 and shots == 0 and toi in (None, "0", "0:00", "00:00"):
+                continue
             games.append({
                 "date":     cells[0],
                 "is_home":  cells[2] == "vs",
-                "goals":    _safe_float(cells[5],  0, 10) or 0,
-                "assists":  _safe_float(cells[6],  0, 10) or 0,
+                "goals":    goals,
+                "assists":  assists,
                 "points":   _safe_float(cells[7],  0, 10) or 0,
-                "shots":    _safe_float(cells[9],  0, 20) or 0,
+                "shots":    shots,
                 "pim":      _safe_float(cells[10], 0, 50) or 0 if len(cells) > 10 else 0,
-                "toi":      cells[11] if len(cells) > 11 else None,
+                "toi":      toi,
                 "blocked_shots": 0,  # not in Statmuse table
                 "pp_goals": 0,
                 "pp_points": 0,
@@ -615,7 +619,6 @@ STATMUSE_MLB_SLUGS = {
     "adley rutschman":       "adley-rutschman-15818",
     "will smith":            "will-smith-13911",
     "kyle tucker":           "kyle-tucker-12577",
-    "yordan alvarez":        "yordan-alvarez-14302",
     "gerrit cole":           "gerrit-cole-7569",
     "zack wheeler":          "zack-wheeler-7000",
     "sandy alcantara":       "sandy-alcantara-13280",
@@ -655,7 +658,7 @@ def mlb_gamelog_statmuse(player_name):
 
     try:
         resp = http_requests.get(
-            f"https://www.statmuse.com/mlb/player/{slug}/game-log?seasonYear=2025",
+            f"https://www.statmuse.com/mlb/player/{slug}/game-log?seasonYear=2026",
             headers=STATMUSE_HEADERS, timeout=15
         )
         if resp.status_code != 200:
@@ -974,14 +977,16 @@ def soccer_team_xg(league_key):
 
     try:
         with UnderstatClient() as client:
-            teams_data = client.league(league=us_league).get_team_data(season="2024")
+            teams_data = client.league(league=us_league).get_team_data(season="2025")
 
         teams = []
-        # Handle both dict format (old) and list format (new)
+        # Handle both dict format (numeric-ID keys) and list format
+        # Understat returns: {"87": {"title": "Liverpool", "history": [...]}, ...}
+        # list(dict.items()) gives ("87", data) — we must extract "title" from value, not the key
         if isinstance(teams_data, list):
-            items = [(t.get("title") or t.get("team_name", f"Team_{i}"), t) for i, t in enumerate(teams_data)]
+            items = [(t.get("title") or t.get("team_title") or t.get("team_name", f"Team_{i}"), t) for i, t in enumerate(teams_data)]
         elif isinstance(teams_data, dict):
-            items = list(teams_data.items())
+            items = [(v.get("title") or v.get("team_title") or v.get("name") or k, v) for k, v in teams_data.items()]
         else:
             return jsonify({"error": f"Unexpected data format: {type(teams_data).__name__}"}), 500
 
@@ -1159,7 +1164,7 @@ def soccer_player_stats(league_key):
 
     try:
         with UnderstatClient() as client:
-            players = client.league(league=us_league).get_player_data(season="2024")
+            players = client.league(league=us_league).get_player_data(season="2025")
 
         player_list = []
         for p in players:
