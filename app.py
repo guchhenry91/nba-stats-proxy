@@ -14,6 +14,7 @@ import unicodedata
 import time
 import re as _re
 import os
+from datetime import datetime
 
 
 def strip_accents(s):
@@ -959,12 +960,155 @@ UNDERSTAT_TEAM_LEAGUES = {
 }
 
 
+def _understat_seasons():
+    """
+    Understat season code = the calendar year the season STARTS in (seasons run Aug–May).
+    From August onward we are in the new season; before August, the season that began
+    last year. Returns (current_season, last_season) as strings, e.g. ("2026", "2025").
+    """
+    now = datetime.now()
+    cur = now.year if now.month >= 8 else now.year - 1
+    return str(cur), str(cur - 1)
+
+
+# Full-weight game count — at this many current-season games we trust current data 100%
+# and stop blending in last season. Below it, last season fills the gap so we're not blind.
+_XG_FULL_WEIGHT_GAMES = 10
+
+
+def _aggregate_team_xg(teams_data):
+    """
+    Turn raw Understat league team_data into {team_name: stats_dict}.
+    Handles both dict format ({"87": {"title": "Liverpool", "history": [...]}}) and list.
+    Returns {} on unexpected input.
+    """
+    if isinstance(teams_data, list):
+        items = [(t.get("title") or t.get("team_title") or t.get("team_name", f"Team_{i}"), t)
+                 for i, t in enumerate(teams_data)]
+    elif isinstance(teams_data, dict):
+        items = [(v.get("title") or v.get("team_title") or v.get("name") or k, v)
+                 for k, v in teams_data.items()]
+    else:
+        return {}
+
+    out = {}
+    for team_name, team_info in items:
+        history = team_info.get("history", [])
+        if not history:
+            continue
+
+        total_xg = sum(float(m.get("xG", 0)) for m in history)
+        total_xga = sum(float(m.get("xGA", 0)) for m in history)
+        total_npxg = sum(float(m.get("npxG", 0)) for m in history)
+        total_npxga = sum(float(m.get("npxGA", 0)) for m in history)
+        total_scored = sum(int(m.get("scored", 0)) for m in history)
+        total_missed = sum(int(m.get("missed", 0)) for m in history)
+        n = len(history)
+
+        home_matches = [m for m in history if m.get("h_a") == "h"]
+        away_matches = [m for m in history if m.get("h_a") == "a"]
+
+        def avg_xg(matches):
+            return round(sum(float(m.get("xG", 0)) for m in matches) / len(matches), 3) if matches else None
+
+        def avg_xga(matches):
+            return round(sum(float(m.get("xGA", 0)) for m in matches) / len(matches), 3) if matches else None
+
+        recent5 = history[-5:] if len(history) >= 5 else history
+        recent10 = history[-10:] if len(history) >= 10 else history
+
+        out[team_name] = {
+            "team": team_name,
+            "games": n,
+            "xg_total": round(total_xg, 2),
+            "xga_total": round(total_xga, 2),
+            "xg_per_game": round(total_xg / n, 3),
+            "xga_per_game": round(total_xga / n, 3),
+            "npxg_per_game": round(total_npxg / n, 3),
+            "npxga_per_game": round(total_npxga / n, 3),
+            "goals_scored": total_scored,
+            "goals_conceded": total_missed,
+            "goals_per_game": round(total_scored / n, 3),
+            "goals_conceded_per_game": round(total_missed / n, 3),
+            "home_xg_per_game": avg_xg(home_matches),
+            "home_xga_per_game": avg_xga(home_matches),
+            "away_xg_per_game": avg_xg(away_matches),
+            "away_xga_per_game": avg_xga(away_matches),
+            "home_games": len(home_matches),
+            "away_games": len(away_matches),
+            "recent5_xg": round(sum(float(m.get("xG", 0)) for m in recent5) / len(recent5), 3),
+            "recent5_xga": round(sum(float(m.get("xGA", 0)) for m in recent5) / len(recent5), 3),
+            "recent10_xg": round(sum(float(m.get("xG", 0)) for m in recent10) / len(recent10), 3),
+            "recent10_xga": round(sum(float(m.get("xGA", 0)) for m in recent10) / len(recent10), 3),
+        }
+    return out
+
+
+_XG_BLEND_KEYS = [
+    "xg_per_game", "xga_per_game", "npxg_per_game", "npxga_per_game",
+    "goals_per_game", "goals_conceded_per_game",
+    "home_xg_per_game", "home_xga_per_game", "away_xg_per_game", "away_xga_per_game",
+]
+
+
+def _blend_team_xg(cur, lst):
+    """
+    Blend a team's current-season stats with last season, weighted by how many
+    current games have been played (full current weight at _XG_FULL_WEIGHT_GAMES).
+    - Only last season available (season not started / team not yet played): use last season.
+    - Only current available (promoted team, no last-season record): use current as-is.
+    Adds data_basis ('current' | 'blended' | 'last_season') and blend_weight_current.
+    """
+    if cur and not lst:
+        cur = dict(cur)
+        cur["data_basis"] = "current" if cur["games"] >= 8 else "current_small_sample"
+        cur["blend_weight_current"] = 1.0
+        return cur
+    if lst and not cur:
+        lst = dict(lst)
+        lst["games"] = 0
+        lst["data_basis"] = "last_season"
+        lst["blend_weight_current"] = 0.0
+        return lst
+
+    w = min(cur["games"] / float(_XG_FULL_WEIGHT_GAMES), 1.0)
+    blended = dict(lst)  # inherit last-season keys, then overwrite blended values
+    for k in _XG_BLEND_KEYS:
+        cv, lv = cur.get(k), lst.get(k)
+        if cv is None and lv is None:
+            blended[k] = None
+        elif cv is None:
+            blended[k] = lv
+        elif lv is None:
+            blended[k] = cv
+        else:
+            blended[k] = round(cv * w + lv * (1 - w), 3)
+
+    # Recent form: use current only once there are enough current games to mean something;
+    # otherwise fall back to the blended season average so 1 noisy game can't dominate.
+    if cur["games"] >= 3:
+        for k in ("recent5_xg", "recent5_xga", "recent10_xg", "recent10_xga"):
+            blended[k] = cur.get(k)
+    else:
+        blended["recent5_xg"] = blended["xg_per_game"]
+        blended["recent5_xga"] = blended["xga_per_game"]
+        blended["recent10_xg"] = blended["xg_per_game"]
+        blended["recent10_xga"] = blended["xga_per_game"]
+
+    blended["team"] = cur["team"]
+    blended["games"] = cur["games"]
+    blended["blend_weight_current"] = round(w, 2)
+    blended["data_basis"] = "current" if w >= 0.8 else ("blended" if w > 0 else "last_season")
+    return blended
+
+
 @app.route("/api/soccer/team-xg/<league_key>")
 def soccer_team_xg(league_key):
     """
     Returns all teams' xG stats for a league — independent of bookmaker odds.
-    Each team gets: xG/game, xGA/game, npxG, npxGA, goals scored/conceded,
-    home and away splits, recent form (last 5 and last 10).
+    Blends current season with last season (weighted by current games played) so the
+    model is never blind at season start. Each team gets: xG/game, xGA/game, npxG,
+    npxGA, goals scored/conceded, home/away splits, recent form, and a data_basis flag.
     """
     us_league = UNDERSTAT_TEAM_LEAGUES.get(league_key)
     if not us_league:
@@ -975,92 +1119,43 @@ def soccer_team_xg(league_key):
     if cached:
         return jsonify(cached)
 
+    cur_season, last_season = _understat_seasons()
     try:
-        with UnderstatClient() as client:
-            teams_data = client.league(league=us_league).get_team_data(season="2025")
+        cur_teams, last_teams = {}, {}
+        try:
+            with UnderstatClient() as client:
+                cur_teams = _aggregate_team_xg(client.league(league=us_league).get_team_data(season=cur_season))
+        except Exception:
+            cur_teams = {}
+        try:
+            with UnderstatClient() as client:
+                last_teams = _aggregate_team_xg(client.league(league=us_league).get_team_data(season=last_season))
+        except Exception:
+            last_teams = {}
 
-        teams = []
-        # Handle both dict format (numeric-ID keys) and list format
-        # Understat returns: {"87": {"title": "Liverpool", "history": [...]}, ...}
-        # list(dict.items()) gives ("87", data) — we must extract "title" from value, not the key
-        if isinstance(teams_data, list):
-            items = [(t.get("title") or t.get("team_title") or t.get("team_name", f"Team_{i}"), t) for i, t in enumerate(teams_data)]
-        elif isinstance(teams_data, dict):
-            items = [(v.get("title") or v.get("team_title") or v.get("name") or k, v) for k, v in teams_data.items()]
-        else:
-            return jsonify({"error": f"Unexpected data format: {type(teams_data).__name__}"}), 500
+        if not cur_teams and not last_teams:
+            return jsonify({"error": "No Understat data for current or last season"}), 502
 
-        for team_name, team_info in items:
-            history = team_info.get("history", [])
-            if not history:
-                continue
-
-            # Full season aggregates
-            total_xg = sum(float(m.get("xG", 0)) for m in history)
-            total_xga = sum(float(m.get("xGA", 0)) for m in history)
-            total_npxg = sum(float(m.get("npxG", 0)) for m in history)
-            total_npxga = sum(float(m.get("npxGA", 0)) for m in history)
-            total_scored = sum(int(m.get("scored", 0)) for m in history)
-            total_missed = sum(int(m.get("missed", 0)) for m in history)
-            n = len(history)
-
-            # Home/away splits
-            home_matches = [m for m in history if m.get("h_a") == "h"]
-            away_matches = [m for m in history if m.get("h_a") == "a"]
-
-            def avg_xg(matches):
-                if not matches:
-                    return None
-                return round(sum(float(m.get("xG", 0)) for m in matches) / len(matches), 3)
-
-            def avg_xga(matches):
-                if not matches:
-                    return None
-                return round(sum(float(m.get("xGA", 0)) for m in matches) / len(matches), 3)
-
-            # Recent form: last 5 and last 10 matches (sorted by date, newest last in history)
-            recent5 = history[-5:] if len(history) >= 5 else history
-            recent10 = history[-10:] if len(history) >= 10 else history
-
-            teams.append({
-                "team": team_name,
-                "games": n,
-                "xg_total": round(total_xg, 2),
-                "xga_total": round(total_xga, 2),
-                "xg_per_game": round(total_xg / n, 3),
-                "xga_per_game": round(total_xga / n, 3),
-                "npxg_per_game": round(total_npxg / n, 3),
-                "npxga_per_game": round(total_npxga / n, 3),
-                "goals_scored": total_scored,
-                "goals_conceded": total_missed,
-                "goals_per_game": round(total_scored / n, 3),
-                "goals_conceded_per_game": round(total_missed / n, 3),
-                # Home/away xG splits
-                "home_xg_per_game": avg_xg(home_matches),
-                "home_xga_per_game": avg_xga(home_matches),
-                "away_xg_per_game": avg_xg(away_matches),
-                "away_xga_per_game": avg_xga(away_matches),
-                "home_games": len(home_matches),
-                "away_games": len(away_matches),
-                # Recent form xG
-                "recent5_xg": round(sum(float(m.get("xG", 0)) for m in recent5) / len(recent5), 3),
-                "recent5_xga": round(sum(float(m.get("xGA", 0)) for m in recent5) / len(recent5), 3),
-                "recent10_xg": round(sum(float(m.get("xG", 0)) for m in recent10) / len(recent10), 3),
-                "recent10_xga": round(sum(float(m.get("xGA", 0)) for m in recent10) / len(recent10), 3),
-            })
-
-        # Sort by xG per game descending
+        all_names = set(cur_teams) | set(last_teams)
+        teams = [_blend_team_xg(cur_teams.get(nm), last_teams.get(nm)) for nm in all_names]
+        teams = [t for t in teams if t]
         teams.sort(key=lambda t: t["xg_per_game"], reverse=True)
 
-        # Compute league averages (needed for attack/defense strength calculation)
         all_xg = [t["xg_per_game"] for t in teams]
         all_xga = [t["xga_per_game"] for t in teams]
         league_avg_xg = round(sum(all_xg) / len(all_xg), 3) if all_xg else 1.3
         league_avg_xga = round(sum(all_xga) / len(all_xga), 3) if all_xga else 1.3
 
+        # Season-level basis: how much of the table is still leaning on last season
+        max_games = max((t["games"] for t in teams), default=0)
+        basis = "current" if max_games >= _XG_FULL_WEIGHT_GAMES else ("blended" if max_games > 0 else "last_season")
+
         result = {
             "league": league_key,
-            "season": "2025-26",
+            "season": f"{cur_season}-{str(int(cur_season) + 1)[2:]}",
+            "last_season": f"{last_season}-{cur_season[2:]}",
+            "data_basis": basis,
+            "current_season_max_games": max_games,
             "teams_count": len(teams),
             "league_avg_xg": league_avg_xg,
             "league_avg_xga": league_avg_xga,
@@ -1147,11 +1242,72 @@ UNDERSTAT_LEAGUES = {
 }
 
 
+def _index_players(players):
+    """Raw Understat player list → {player_id: parsed_dict}. Keeps players with >=1 game."""
+    out = {}
+    for p in players or []:
+        games = int(p.get("games", 0))
+        if games < 1:
+            continue
+        pid = p.get("id")
+        if not pid:
+            continue
+        goals = int(p.get("goals", 0))
+        shots = int(p.get("shots", 0))
+        xg = float(p.get("xG", 0))
+        xa = float(p.get("xA", 0))
+        out[pid] = {
+            "name": p.get("player_name", ""),
+            "team": p.get("team_title", ""),
+            "id": pid,
+            "games": games,
+            "goals": goals,
+            "shots": shots,
+            "xg": round(xg, 2),
+            "xa": round(xa, 2),
+            "assists": int(p.get("assists", 0)),
+            "key_passes": int(p.get("key_passes", 0)),
+            "minutes": int(p.get("time", 0)),
+            "goals_per_game": round(goals / games, 3) if games else 0,
+            "shots_per_game": round(shots / games, 2) if games else 0,
+            "xg_per_game": round(xg / games, 3) if games else 0,
+            "xa_per_game": round(xa / games, 3) if games else 0,
+        }
+    return out
+
+
+# Goal rate stabilises slower than team xG; give current a bit more runway before full trust
+_PLAYER_FULL_WEIGHT_GAMES = 8
+_PLAYER_RATE_KEYS = ["goals_per_game", "shots_per_game", "xg_per_game", "xa_per_game"]
+
+
+def _blend_player(cur, lst):
+    """Blend a player's per-game rates across seasons, weighted by current games played."""
+    if cur and not lst:
+        cur = dict(cur)
+        cur["data_basis"] = "current" if cur["games"] >= 5 else "current_small_sample"
+        return cur
+    if lst and not cur:
+        lst = dict(lst)
+        lst["data_basis"] = "last_season"
+        return lst
+
+    w = min(cur["games"] / float(_PLAYER_FULL_WEIGHT_GAMES), 1.0)
+    blended = dict(cur)  # prefer current-season identity (team can change between seasons)
+    for k in _PLAYER_RATE_KEYS:
+        blended[k] = round(cur.get(k, 0) * w + lst.get(k, 0) * (1 - w), 3)
+    blended["team"] = cur.get("team") or lst.get("team")
+    blended["data_basis"] = "current" if w >= 0.8 else ("blended" if w > 0 else "last_season")
+    blended["blend_weight_current"] = round(w, 2)
+    return blended
+
+
 @app.route("/api/soccer/players/<league_key>")
 def soccer_player_stats(league_key):
     """
     Returns all player stats for a league: xG, shots, xA, goals, assists, key passes.
-    League keys: epl, laliga
+    Blends current season with last season (weighted by current games) so goal-scorer
+    priors exist from matchday 1 instead of being blind. League keys: epl, laliga
     """
     us_league = UNDERSTAT_LEAGUES.get(league_key)
     if not us_league:
@@ -1162,46 +1318,37 @@ def soccer_player_stats(league_key):
     if cached:
         return jsonify(cached)
 
+    cur_season, last_season = _understat_seasons()
     try:
-        with UnderstatClient() as client:
-            players = client.league(league=us_league).get_player_data(season="2025")
+        cur_players, last_players = {}, {}
+        try:
+            with UnderstatClient() as client:
+                cur_players = _index_players(client.league(league=us_league).get_player_data(season=cur_season))
+        except Exception:
+            cur_players = {}
+        try:
+            with UnderstatClient() as client:
+                last_players = _index_players(client.league(league=us_league).get_player_data(season=last_season))
+        except Exception:
+            last_players = {}
 
-        player_list = []
-        for p in players:
-            games = int(p.get("games", 0))
-            if games < 3:
-                continue
-            goals = int(p.get("goals", 0))
-            shots = int(p.get("shots", 0))
-            xg = float(p.get("xG", 0))
-            xa = float(p.get("xA", 0))
-            key_passes = int(p.get("key_passes", 0))
-            assists = int(p.get("assists", 0))
-            mins = int(p.get("time", 0))
+        if not cur_players and not last_players:
+            return jsonify({"error": "No Understat player data for current or last season"}), 502
 
-            player_list.append({
-                "name": p.get("player_name", ""),
-                "team": p.get("team_title", ""),
-                "id": p.get("id"),
-                "games": games,
-                "goals": goals,
-                "shots": shots,
-                "xg": round(xg, 2),
-                "xa": round(xa, 2),
-                "assists": assists,
-                "key_passes": key_passes,
-                "minutes": mins,
-                "goals_per_game": round(goals / games, 3) if games else 0,
-                "shots_per_game": round(shots / games, 2) if games else 0,
-                "xg_per_game": round(xg / games, 3) if games else 0,
-                "xa_per_game": round(xa / games, 3) if games else 0,
-            })
-
+        all_ids = set(cur_players) | set(last_players)
+        player_list = [_blend_player(cur_players.get(pid), last_players.get(pid)) for pid in all_ids]
+        # Require a real sample in whichever season backs the number (>=3 games)
+        player_list = [p for p in player_list if p and p.get("games", 0) >= 3]
         player_list.sort(key=lambda x: x["goals"], reverse=True)
+
+        max_games = max((p["games"] for p in player_list), default=0)
+        basis = "current" if max_games >= _PLAYER_FULL_WEIGHT_GAMES else ("blended" if max_games > 0 else "last_season")
 
         result = {
             "league": league_key,
-            "season": "2025-26",
+            "season": f"{cur_season}-{str(int(cur_season) + 1)[2:]}",
+            "last_season": f"{last_season}-{cur_season[2:]}",
+            "data_basis": basis,
             "players_count": len(player_list),
             "players": player_list,
         }
