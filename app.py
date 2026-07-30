@@ -1102,13 +1102,165 @@ def _blend_team_xg(cur, lst):
     return blended
 
 
+# ── Summer-transfer adjustment ───────────────────────────────────────────────
+# Last-season team xG assumes last season's squad. Over the summer, players move.
+# We reweight each team's last-season ATTACK by the ratio of its CURRENT squad's
+# last-season xG to the xG of the squad that produced last season's numbers.
+# Departed players drop out; arrivals bring their old-club xG with them.
+# Defense (xGA) is team/system driven and can't be rebuilt from player xG, so it is
+# left on the raw last-season value and self-corrects within a few current games.
+
+ESPN_SOCCER_LEAGUE = {
+    "epl": "eng.1", "laliga": "esp.1", "bundesliga": "ger.1",
+    "seriea": "ita.1", "ligue1": "fra.1",
+}
+
+
+def _nrm(s):
+    """Accent-stripped, lowercased, trimmed — for cross-source name matching."""
+    s = ''.join(c for c in unicodedata.normalize('NFD', s or '') if unicodedata.category(c) != 'Mn')
+    return s.lower().strip()
+
+
+def _crossleague_player_xg(season):
+    """
+    {norm_player_name: {'xg': season_total_xg, 'team': last_club}} across every
+    Understat league for one season. Lets us find an arrival's old-club output no
+    matter which covered league he came from. Cached (shared by all league endpoints).
+    """
+    ck = f"xleague_pxg_{season}"
+    cached = get_cached(ck)
+    if cached:
+        return cached
+    idx = {}
+    for us_league in set(UNDERSTAT_TEAM_LEAGUES.values()):
+        try:
+            with UnderstatClient() as client:
+                players = client.league(league=us_league).get_player_data(season=season)
+        except Exception:
+            continue
+        for p in players or []:
+            nm = _nrm(p.get("player_name"))
+            if not nm:
+                continue
+            xg = float(p.get("xG", 0))
+            # if a name appears in two leagues (mid-season move), keep the larger sample
+            if nm not in idx or xg > idx[nm]["xg"]:
+                idx[nm] = {"xg": xg, "team": p.get("team_title", "")}
+    set_cached(ck, idx)
+    return idx
+
+
+def _espn_squads(espn_league):
+    """{norm_team_name: set(norm_player_names)} of current rosters. {} on failure."""
+    ck = f"espn_squads_{espn_league}"
+    cached = get_cached(ck)
+    if cached:
+        return {k: set(v) for k, v in cached.items()}  # lists -> sets after cache round-trip
+    try:
+        teams = http_requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{espn_league}/teams",
+            timeout=12).json()["sports"][0]["leagues"][0]["teams"]
+    except Exception:
+        return {}
+    out = {}
+    for t in teams:
+        team = t.get("team", {})
+        tid, tname = team.get("id"), _nrm(team.get("displayName"))
+        if not tid or not tname:
+            continue
+        try:
+            ath = http_requests.get(
+                f"https://site.api.espn.com/apis/site/v2/sports/soccer/{espn_league}/teams/{tid}/roster",
+                timeout=12).json().get("athletes", [])
+            out[tname] = set(_nrm(a.get("displayName")) for a in ath if a.get("displayName"))
+        except Exception:
+            continue
+    if out:
+        set_cached(ck, {k: list(v) for k, v in out.items()})
+    return out
+
+
+def _match_squad(understat_team, espn_squads):
+    """Best-matching ESPN squad for an Understat team name, or None."""
+    ut = _nrm(understat_team)
+    if ut in espn_squads:
+        return espn_squads[ut]
+    cands = [sq for name, sq in espn_squads.items() if ut in name or name in ut]
+    if len(cands) == 1:
+        return cands[0]
+    ut_tokens = set(ut.split())
+    best, best_score = None, 0
+    for name, sq in espn_squads.items():
+        score = len(ut_tokens & set(name.split()))
+        if score > best_score:
+            best, best_score = sq, score
+    return best if best_score >= 1 else None
+
+
+# The raw squad-xG ratio is directionally right but noisy (arrivals from leagues
+# Understat doesn't cover are missed, biasing it down). So we SHRINK it toward 1.0
+# (keep 60% of the deviation) and clamp tight — a conservative nudge, not a full swing.
+_TRANSFER_SHRINK = 0.6
+_TRANSFER_MIN, _TRANSFER_MAX = 0.75, 1.35
+
+
+def _transfer_attack_ratio(team_name, last_index, espn_squads):
+    """
+    Ratio of current-squad last-season xG to last-season-squad xG for a team.
+    ~1.0 stable, <1 lost attackers, >1 gained. Both sums use the same index so the
+    'unmatched youth = 0' bias largely cancels. Returns 1.0 when coverage is thin
+    (graceful: no adjustment beats a bad one). Shrunk toward 1.0 and clamped.
+    """
+    squad = _match_squad(team_name, espn_squads)
+    if not squad:
+        return 1.0, "no_squad"
+    tn = _nrm(team_name)
+    last_squad_xg = sum(v["xg"] for v in last_index.values()
+                        if tn and (tn in _nrm(v["team"]) or _nrm(v["team"]) in tn))
+    cur_matched = [last_index[nm]["xg"] for nm in squad if nm in last_index]
+    cur_squad_xg = sum(cur_matched)
+    # Require a solid overlap before trusting the ratio at all
+    if last_squad_xg < 30 or len(cur_matched) < 10:
+        return 1.0, "low_coverage"
+    raw = cur_squad_xg / last_squad_xg
+    shrunk = 1.0 + (raw - 1.0) * _TRANSFER_SHRINK
+    return round(max(_TRANSFER_MIN, min(_TRANSFER_MAX, shrunk)), 3), "adjusted"
+
+
+_ATTACK_FIELDS = ("xg_per_game", "home_xg_per_game", "away_xg_per_game",
+                  "npxg_per_game", "goals_per_game", "recent5_xg", "recent10_xg")
+
+
+def _apply_transfer_adjustment(last_teams, league_key, last_season):
+    """Scale each team's last-season attack fields by its transfer ratio, in place."""
+    espn_lg = ESPN_SOCCER_LEAGUE.get(league_key)
+    if not last_teams or not espn_lg:
+        return
+    squads = _espn_squads(espn_lg)
+    if not squads:
+        return
+    xindex = _crossleague_player_xg(last_season)
+    if not xindex:
+        return
+    for nm, tinfo in last_teams.items():
+        ratio, basis = _transfer_attack_ratio(nm, xindex, squads)
+        tinfo["transfer_ratio"] = ratio
+        tinfo["transfer_basis"] = basis
+        if ratio != 1.0:
+            for k in _ATTACK_FIELDS:
+                if tinfo.get(k) is not None:
+                    tinfo[k] = round(tinfo[k] * ratio, 3)
+
+
 @app.route("/api/soccer/team-xg/<league_key>")
 def soccer_team_xg(league_key):
     """
     Returns all teams' xG stats for a league — independent of bookmaker odds.
     Blends current season with last season (weighted by current games played) so the
-    model is never blind at season start. Each team gets: xG/game, xGA/game, npxG,
-    npxGA, goals scored/conceded, home/away splits, recent form, and a data_basis flag.
+    model is never blind at season start. Last-season attack is transfer-adjusted for
+    summer moves. Each team gets: xG/game, xGA/game, npxG, npxGA, goals scored/conceded,
+    home/away splits, recent form, and a data_basis flag.
     """
     us_league = UNDERSTAT_TEAM_LEAGUES.get(league_key)
     if not us_league:
@@ -1135,6 +1287,13 @@ def soccer_team_xg(league_key):
 
         if not cur_teams and not last_teams:
             return jsonify({"error": "No Understat data for current or last season"}), 502
+
+        # Summer-transfer correction: reweight last-season attack by current squads
+        # (best-effort, graceful — a failure leaves the raw last-season blend intact).
+        try:
+            _apply_transfer_adjustment(last_teams, league_key, last_season)
+        except Exception:
+            pass
 
         all_names = set(cur_teams) | set(last_teams)
         teams = [_blend_team_xg(cur_teams.get(nm), last_teams.get(nm)) for nm in all_names]
