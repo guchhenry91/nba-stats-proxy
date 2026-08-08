@@ -1,19 +1,22 @@
 name: Keep Warm
 
 # Render's free tier sleeps a service after 15 min with no HTTP traffic; the first
-# request after that takes 30-50s to wake it, which reads as "down". This pings
-# /health so the proxy stays awake. Independent of UptimeRobot (belt & suspenders).
-# Two pings ~5 min apart per run means even a delayed GitHub cron can't leave a gap
-# longer than Render's 15-min sleep window.
+# request after that takes 30-50s to wake it, which reads as "down".
+#
+# GitHub throttles FREQUENT scheduled workflows badly (a */10 cron actually fires
+# every ~30-50 min), which leaves gaps longer than Render's 15-min sleep window.
+# So instead of relying on cron frequency, each run stays alive and pings in a LOOP
+# for ~68 min. A light 30-min schedule then only needs to *start* a run occasionally;
+# the long-running loop bridges any throttle delay between starts.
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (UTC); GitHub may delay under load
+    - cron: "0,30 * * * *"   # try to start every 30 min (GitHub may delay the start)
   workflow_dispatch: {}
 
 concurrency:
   group: keep-warm
-  cancel-in-progress: true
+  cancel-in-progress: true    # newest run wins; it pings immediately on start
 
 permissions:
   contents: read
@@ -21,15 +24,14 @@ permissions:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 75
     steps:
-      - name: Ping health (wake if cold)
+      - name: Ping /health in a loop for ~68 minutes
         run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" -m 90 https://nba-stats-proxy-9kur.onrender.com/health || echo "000")
-          echo "ping 1 -> HTTP $code"
-      - name: Wait 5 min
-        run: sleep 300
-      - name: Ping health again
-        run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" -m 90 https://nba-stats-proxy-9kur.onrender.com/health || echo "000")
-          echo "ping 2 -> HTTP $code"
+          URL="https://nba-stats-proxy-9kur.onrender.com/health"
+          # 18 pings, 4 min apart = ~68 min of coverage, well past the next scheduled start
+          for i in $(seq 1 18); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -m 90 "$URL" || echo "000")
+            echo "$(date -u +%H:%M:%S) ping $i -> HTTP $code"
+            if [ "$i" -lt 18 ]; then sleep 240; fi
+          done
