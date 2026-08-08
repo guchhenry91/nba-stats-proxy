@@ -1,0 +1,35 @@
+name: Keep Warm
+
+# Render's free tier sleeps a service after 15 min with no HTTP traffic; the first
+# request after that takes 30-50s to wake it, which reads as "down". This pings
+# /health so the proxy stays awake. Independent of UptimeRobot (belt & suspenders).
+# Two pings ~5 min apart per run means even a delayed GitHub cron can't leave a gap
+# longer than Render's 15-min sleep window.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (UTC); GitHub may delay under load
+  workflow_dispatch: {}
+
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Ping health (wake if cold)
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" -m 90 https://nba-stats-proxy-9kur.onrender.com/health || echo "000")
+          echo "ping 1 -> HTTP $code"
+      - name: Wait 5 min
+        run: sleep 300
+      - name: Ping health again
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" -m 90 https://nba-stats-proxy-9kur.onrender.com/health || echo "000")
+          echo "ping 2 -> HTTP $code"
