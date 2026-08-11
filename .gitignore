@@ -1,0 +1,4 @@
+
+# graphify knowledge graph output (regenerable via `graphify update .`)
+graphify-out/
+__pycache__/
