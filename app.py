@@ -16,6 +16,8 @@ import re as _re
 import os
 from datetime import datetime
 
+import live
+
 
 def strip_accents(s):
     """Remove accents: Lafrenière → Lafreniere, Müller → Muller"""
@@ -32,10 +34,16 @@ _cache = {}
 CACHE_TTL = 2 * 60 * 60  # 2 hours
 
 
-def get_cached(key):
+def get_cached(key, ttl=None):
+    """Cached value, or None. `ttl` overrides the default for short-lived data.
+
+    Gamelogs do not change once a game ends, hence the two-hour default. Live
+    in-play scores are the opposite: stale by definition within a minute, so the
+    live endpoint passes its own much shorter TTL rather than sharing this one.
+    """
     if key in _cache:
         ts, data = _cache[key]
-        if time.time() - ts < CACHE_TTL:
+        if time.time() - ts < (CACHE_TTL if ttl is None else ttl):
             return data
     return None
 
@@ -1704,5 +1712,69 @@ def soccer_gamelog_statmuse(player_name):
         return jsonify({"error": str(e), "player": player_name}), 500
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+
+
+# --- live in-play scores for Henry's Match Engine -----------------------------
+#
+# WHY THIS LIVES HERE. index.html is served by Render as a STATIC site: no
+# server, so nowhere to keep a secret and no way to change a file without a
+# commit and a deploy. Live scores need ~60s granularity; the publish pipeline
+# gets 24 rationed GitHub Actions slots a day, honoured 55-70%. So the page
+# cannot get live data through its own pipeline -- it has to fetch from an origin
+# that is already running and already holds a key. That is this service.
+#
+# THE KEY NEVER LEAVES THIS PROCESS. /api/config hands ODDS_API_KEY to any caller
+# that asks; this endpoint deliberately does not follow that pattern. It returns
+# scores, never the credential.
+#
+# ONE UPSTREAM CALL SERVES EVERYONE. `fixtures?live=all` returns every in-play
+# match worldwide in a single request -- verified 2026-09-05: 102 fixtures, one
+# request, including Newcastle 0-1 Bournemouth at 1H 28'. The cache below means
+# cost is independent of how many people are watching, which is the difference
+# between this being free and it being a quota problem.
+#
+# The filtering rules live in live.py so they can be tested without importing
+# this service and its nba_api/understatapi dependencies.
+LIVE_TTL = 30  # seconds. Below the poll interval, so viewers share one fetch.
+
+
+@app.route("/api/soccer/live")
+def soccer_live():
+    """In-play scores for the five leagues plus the Champions League.
+
+    Display only. These scores are provisional by definition and must never be
+    used to settle anything: the engine grades on FT/AET/PEN alone, and a live
+    score written as final would settle a pick against a scoreline that had not
+    happened yet, into an append-only record.
+    """
+    cached = get_cached("soccer_live", ttl=LIVE_TTL)
+    if cached is not None:
+        return jsonify({**cached, "cached": True})
+
+    key = os.environ.get("API_FOOTBALL_KEY", "")
+    if not key:
+        # 200, not 500. A missing key is a deployment state, not a page error,
+        # and the board must render normally with no live data rather than
+        # showing the reader a failure it can do nothing about.
+        return jsonify({"matches": [], "available": False,
+                        "reason": "API_FOOTBALL_KEY not configured"})
+
+    try:
+        resp = http_requests.get(
+            "https://v3.football.api-sports.io/fixtures",
+            params={"live": "all"},
+            headers={"x-apisports-key": key},
+            timeout=12,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        return jsonify({"matches": [], "available": False,
+                        "reason": f"upstream: {type(exc).__name__}"})
+
+    body = {"matches": live.shape(payload.get("response")),
+            "available": True,
+            "fetched_at": datetime.utcnow().isoformat() + "Z",
+            "ttl": LIVE_TTL}
+    set_cached("soccer_live", body)
+    return jsonify({**body, "cached": False})
