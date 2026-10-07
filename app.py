@@ -6,7 +6,7 @@ Deploy to Render free tier.
 """
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from nba_api.stats.endpoints import playergamelog
+from nba_api.stats.endpoints import leaguegamelog, playergamelog
 from nba_api.stats.static import players
 import requests as http_requests
 from understatapi import UnderstatClient
@@ -153,6 +153,39 @@ def nba_gamelog(player_name):
 
     except Exception as e:
         return jsonify({"error": str(e), "player": player_name}), 500
+
+
+@app.route("/api/nba/leaguegamelog")
+def nba_league_gamelog():
+    """
+    stats.nba.com's whole-league player game log, passed through unchanged.
+    Henry's Match Engine reads it when stats.nba.com will not answer its own job
+    container (nba/current.py). Query params: season (e.g. 2026-27), season_type
+    ("Regular Season" or "Pre Season").
+    Response: stats.nba.com's own JSON ({"resultSets": [{"headers", "rowSet"}]}).
+    """
+    season = request.args.get("season", "2025-26")
+    season_type = request.args.get("season_type", "Regular Season")
+    if season_type not in ("Regular Season", "Pre Season", "Playoffs"):
+        return jsonify({"error": "unknown season_type", "season_type": season_type}), 400
+    if not _re.fullmatch(r"\d{4}-\d{2}", season):
+        return jsonify({"error": "season must look like 2026-27", "season": season}), 400
+    cache_key = f"leaguegamelog_{season}_{season_type}"
+    cached = get_cached(cache_key, ttl=10 * 60)
+    if cached:
+        return jsonify(cached)
+    try:
+        log = leaguegamelog.LeagueGameLog(
+            season=season,
+            season_type_all_star=season_type,
+            player_or_team_abbreviation="P",
+            timeout=25,
+        )
+        result = log.get_dict()
+        set_cached(cache_key, result)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "season": season, "season_type": season_type}), 502
 
 
 @app.route("/api/nba/player/<player_name>/stats")
