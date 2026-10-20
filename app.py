@@ -316,126 +316,11 @@ STATMUSE_HEADERS = {
 }
 
 # Slug map — Statmuse uses player-name-ID format
-STATMUSE_SLUGS = {
-    "scottie barnes":            "scottie-barnes-30239",
-    "bam adebayo":               "bam-adebayo-4066",
-    "jalen brunson":             "jalen-brunson-9795",
-    "jayson tatum":              "jayson-tatum-9582",
-    "tyrese maxey":              "tyrese-maxey-30192",
-    "alperen sengun":            "alperen-sengun-30314",
-    "lebron james":              "lebron-james-1780",
-    "kevin durant":              "kevin-durant-985",
-    "pascal siakam":             "pascal-siakam-3059",
-    "nikola jokic":              "nikola-jokic-9226",
-    "shai gilgeous-alexander":   "shai-gilgeous-alexander-9773",
-    "jaylen brown":              "jaylen-brown-9390",
-    "anthony edwards":           "anthony-edwards-30191",
-    "luka doncic":               "luka-doncic-9988",
-    "victor wembanyama":         "victor-wembanyama-30249",
-    "cade cunningham":           "cade-cunningham-30241",
-    "donovan mitchell":          "donovan-mitchell-9695",
-    "karl-anthony towns":        "karl-anthony-towns-3059",
-    "devin booker":              "devin-booker-9502",
-    "trae young":                "trae-young-9988",
-    "giannis antetokounmpo":     "giannis-antetokounmpo-3032",
-    "stephen curry":             "stephen-curry-791",
-    "joel embiid":               "joel-embiid-3157",
-    "damian lillard":            "damian-lillard-2571",
-    "jimmy butler":              "jimmy-butler-2619",
-    "zion williamson":           "zion-williamson-30099",
-    "ja morant":                 "ja-morant-30107",
-    "darius garland":            "darius-garland-30101",
-    "evan mobley":               "evan-mobley-30237",
-    "jarrett allen":             "jarrett-allen-9611",
-    "paul george":               "paul-george-1621",
-    "kawhi leonard":             "kawhi-leonard-2001",
-    "james harden":              "james-harden-686",
-    "kyrie irving":              "kyrie-irving-1677",
-    "russell westbrook":         "russell-westbrook-706",
-    "chris paul":                "chris-paul-383",
-    "lamelo ball":               "lamelo-ball-30199",
-    "miles bridges":             "miles-bridges-9711",
-    "brandon miller":            "brandon-miller-30250",
-    "paolo banchero":            "paolo-banchero-30244",
-    "franz wagner":              "franz-wagner-30233",
-    "jalen suggs":               "jalen-suggs-30238",
-    "dejounte murray":           "dejounte-murray-4061",
-    "onyeka okongwu":            "onyeka-okongwu-30195",
-    "clint capela":              "clint-capela-3074",
-    "nikola vucevic":            "nikola-vucevic-2011",
-    "domantas sabonis":          "domantas-sabonis-3940",
-    "de'aaron fox":              "deaaron-fox-9575",
-    "keegan murray":             "keegan-murray-30243",
-    "andrew wiggins":            "andrew-wiggins-3073",
-    "draymond green":            "draymond-green-2561",
-    "klay thompson":             "klay-thompson-1470",
-    "tyler herro":               "tyler-herro-30100",
-    "terry rozier":              "terry-rozier-3938",
-    "jrue holiday":              "jrue-holiday-1424",
-    "kristaps porzingis":        "kristaps-porzingis-3898",
-    "al horford":                "al-horford-370",
-    "derrick white":             "derrick-white-9578",
-    "payton pritchard":          "payton-pritchard-30181",
-    "julius randle":             "julius-randle-3151",
-    "og anunoby":                "og-anunoby-9699",
-    "mikal bridges":             "mikal-bridges-9713",
-    "josh hart":                 "josh-hart-9576",
-    "donte divincenzo":          "donte-divincenzo-9714",
-    "zach lavine":               "zach-lavine-3147",
-    "coby white":                "coby-white-30102",
-    "michael porter jr":         "michael-porter-jr-9741",
-    "jamal murray":              "jamal-murray-9412",
-    "aaron gordon":              "aaron-gordon-3150",
-    "anfernee simons":           "anfernee-simons-9748",
-    "scoot henderson":           "scoot-henderson-30251",
-    "shaedon sharpe":            "shaedon-sharpe-30245",
-    "jerami grant":              "jerami-grant-3153",
-    "fred vanvleet":             "fred-vanvleet-9413",
-    "immanuel quickley":         "immanuel-quickley-30190",
-    "rj barrett":                "rj-barrett-30103",
-    "cam thomas":                "cam-thomas-30240",
-    "ben simmons":               "ben-simmons-4052",
-    "dennis schroder":           "dennis-schroder-2692",
-    "austin reaves":             "austin-reaves-30223",
-    "d'angelo russell":          "dangelo-russell-3886",
-    "anthony davis":             "anthony-davis-2440",
-}
 
 
 _SM_ROW = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL)
 _SM_CELL = _re.compile(r'<td[^>]*>(.*?)</td>', _re.DOTALL)
 _SM_TAG = _re.compile(r'<[^>]+>')
-
-def _sm_parse_rows(html_text):
-    """
-    Parse all <tr> rows from Statmuse HTML, return list of cell-value lists.
-    Skips header rows, Average rows, and rows with fewer than 8 cells.
-    Confirmed row format for all sports:
-      cells[0] = Date  (e.g. "Sun 4/9")
-      cells[1] = Team  (e.g. "WAS")
-      cells[2] = vs/@
-      cells[3] = Opp
-      cells[4] = Result (e.g. "W 114-108")
-      cells[5..] = stats (sport-specific)
-    """
-    rows = []
-    for m in _SM_ROW.finditer(html_text):
-        cells = [_SM_TAG.sub('', c).strip() for c in _SM_CELL.findall(m.group(1))]
-        cells = [c for c in cells if c]
-        if len(cells) < 8:
-            continue
-        # Skip header rows and Average/Total rows
-        if cells[0] in ('Average', 'Total', 'G', 'Date', '#'):
-            continue
-        # First cell must look like a date: "Mon 4/7", "Sat 3/22" etc.
-        if not _re.match(r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d', cells[0]):
-            continue
-        # cells[2] must be "vs" or "@"
-        if cells[2] not in ('vs', '@'):
-            continue
-        rows.append(cells)
-    return rows
-
 
 def _safe_float(val, lo, hi):
     try:
@@ -445,302 +330,211 @@ def _safe_float(val, lo, hi):
         return None
 
 
+# ── StatMuse, read by NAME and by COLUMN HEADER (fixed 2026-10-20) ────────────────
+# The routes below used to read StatMuse's tables by fixed cell POSITION from pages
+# found through hand-written player ids. Both had drifted: StatMuse added columns, so
+# NBA "fg3m" was field goals made (Brunson's 4 threes read as 14), MLB "homeRuns"
+# was doubles and "strikeouts" RBIs, NHL "shots" was penalty minutes -- and ids like
+# "connor-mcdavid-3114" and "aaron-judge-10309" now open OTHER players' pages (Matt
+# Irwin, Fred Chapman). Now: StatMuse's own ask-by-name page (the one /fc already
+# uses), the page checked to be the right player, every value read by its header.
+import unicodedata as _ud
+
+
+def _sm_name_slug(name):
+    n = _ud.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    return _re.sub(r"[^a-z0-9]+", "-", n).strip("-")
+
+
+def _sm_norm(name):
+    n = _ud.normalize("NFKD", str(name)).encode("ascii", "ignore").decode().lower()
+    return _re.sub(r"[^a-z]", "", n)
+
+
+_SM_TH = _re.compile(r"<th[^>]*>(.*?)</th>", _re.DOTALL)
+
+
+def _sm_table(html_text):
+    """Rows of StatMuse's first game-log table as {HEADER: text}. The empty header
+    right after TM is the home/away column; it is returned as "HA"."""
+    th = [_SM_TAG.sub("", h).strip().upper() for h in _SM_TH.findall(html_text)]
+    if "DATE" not in th:
+        return []
+    # one header row: cut where the header list starts repeating (a second table)
+    first = th[0]
+    end = th.index(first, 1) if first and first in th[1:] else len(th)
+    if not first:                                  # ask pages start with blank headers
+        for k in range(1, len(th)):
+            if th[k] == "NAME" and k > 2:
+                end = k - 2
+                break
+    heads = th[:end]    # may run on into later tables' headers: rows zip only their own length
+    names = []
+    for k, h in enumerate(heads):
+        if h == "" and k > 0 and heads[k - 1] == "TM":
+            names.append("HA")
+        else:
+            names.append(h or f"_{k}")
+    rows = []
+    for m in _SM_ROW.finditer(html_text):
+        cells = [_SM_TAG.sub("", c).strip() for c in _SM_CELL.findall(m.group(1))]
+        if len(cells) < 8:
+            continue
+        row = dict(zip(names, cells))
+        if row.get("HA") not in ("vs", "@"):
+            continue                               # header, average or total row
+        rows.append(row)
+    return rows
+
+
+def _sm_seasons(sport):
+    """Ask-page season labels, newest first: the season in play, then the last."""
+    import datetime as _dt
+    today = _dt.date.today()
+    if sport == "mlb":
+        y = today.year if today.month >= 3 else today.year - 1
+        return [str(y), str(y - 1)]
+    y = today.year if today.month >= 9 else today.year - 1        # NBA / NHL start in autumn
+    return [f"{y}-{str(y + 1)[2:]}", f"{y - 1}-{str(y)[2:]}"]
+
+
+def _sm_gamelog(sport, player_name, n_games):
+    """(rows newest first, None) or (None, (error, status)). Asks StatMuse by name,
+    current season then the last, and refuses a page that is not this player."""
+    want = _sm_norm(player_name)
+    out = []
+    for season in _sm_seasons(sport):
+        url = f"https://www.statmuse.com/{sport}/ask/{_sm_name_slug(player_name)}-game-log-{season}"
+        resp = http_requests.get(url, headers=STATMUSE_HEADERS, timeout=15)
+        if resp.status_code != 200:
+            continue
+        for row in _sm_table(resp.text):
+            # NAME reads "Jalen Brunson J. Brunson": the right player, or nothing
+            if "NAME" in row and not _sm_norm(row["NAME"]).startswith(want):
+                continue
+            out.append(row)
+        if len(out) >= n_games:
+            break
+    if not out:
+        return None, ("player_not_found_on_statmuse", 404)
+    return out[:n_games], None
+
+
+def _sm_num(row, key, lo, hi):
+    return _safe_float(str(row.get(key, "")).replace("+", ""), lo, hi) or 0
+
+
+def _sm_cached(key):
+    if key in _cache:
+        ts, data = _cache[key]
+        if time.time() - ts < 1800:
+            return data
+    return None
+
+
+
 @app.route("/api/nba/player/<player_name>/gamelog/statmuse")
 def nba_gamelog_statmuse(player_name):
-    """
-    Real-time NBA game log from Statmuse SSR (30-min cache).
-    Row format: [Date, Team, vs/@, Opp, Result, MIN, PTS, REB, AST, STL, BLK, FG3M, ...]
-    Falls back: frontend uses /gamelog (nba_api) if 404 returned.
-    """
+    """Recent NBA game log from StatMuse (30-min cache), read by name and header.
+    Falls back: frontend uses /gamelog (nba_api) if 404 returned."""
     n_games = min(int(request.args.get("games", 10)), 20)
     cache_key = f"statmuse_nba_{player_name.lower()}"
-    if cache_key in _cache:
-        ts, data = _cache[cache_key]
-        if time.time() - ts < 1800:
-            return jsonify(data)
-
-    slug = STATMUSE_SLUGS.get(player_name.lower())
-    if not slug:
-        p_lower = player_name.lower()
-        for key, val in STATMUSE_SLUGS.items():
-            if p_lower in key or key in p_lower:
-                slug = val
-                break
-    if not slug:
-        return jsonify({"error": "slug_not_found", "player": player_name}), 404
-
+    hit = _sm_cached(cache_key)
+    if hit:
+        return jsonify(hit)
     try:
-        resp = http_requests.get(
-            f"https://www.statmuse.com/nba/player/{slug}/game-log?seasonYear=2026",
-            headers=STATMUSE_HEADERS, timeout=15
-        )
-        if resp.status_code != 200:
-            return jsonify({"error": f"Statmuse {resp.status_code}"}), 502
-
+        rows, err = _sm_gamelog("nba", player_name, n_games)
+        if err:
+            return jsonify({"error": err[0], "player": player_name}), err[1]
         games = []
-        for cells in _sm_parse_rows(resp.text):
-            # cells[5]=MIN, [6]=PTS, [7]=REB, [8]=AST, [9]=STL, [10]=BLK, [11]=FG3M
-            mins = _safe_float(cells[5], 0, 50)
-            if mins is None or mins == 0:
-                continue  # skip DNP
+        for r in rows:
+            mins = _safe_float(r.get("MIN"), 0, 65)
+            if not mins:
+                continue                                   # did not play
             games.append({
-                "date":     cells[0],
-                "is_home":  cells[2] == "vs",
-                "min":      mins,
-                "pts":      _safe_float(cells[6],  0, 80) or 0,
-                "reb":      _safe_float(cells[7],  0, 30) or 0,
-                "ast":      _safe_float(cells[8],  0, 25) or 0,
-                "stl":      _safe_float(cells[9],  0, 10) or 0,
-                "blk":      _safe_float(cells[10], 0, 10) or 0,
-                "fg3m":     _safe_float(cells[11], 0, 15) or 0 if len(cells) > 11 else 0,
+                "date": r.get("DATE"), "is_home": r.get("HA") == "vs", "min": mins,
+                "pts": _sm_num(r, "PTS", 0, 100), "reb": _sm_num(r, "REB", 0, 40),
+                "ast": _sm_num(r, "AST", 0, 30), "stl": _sm_num(r, "STL", 0, 15),
+                "blk": _sm_num(r, "BLK", 0, 15), "fg3m": _sm_num(r, "3PM", 0, 20),
             })
-            if len(games) >= n_games:
-                break
-
         if not games:
             return jsonify({"error": "No rows parsed", "player": player_name}), 500
-
-        result = {
-            "player_name": player_name, "source": "statmuse",
-            "games_count": len(games), "games": games,
-        }
+        result = {"player_name": player_name, "source": "statmuse",
+                  "games_count": len(games), "games": games}
         _cache[cache_key] = (time.time(), result)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "player": player_name}), 500
 
 
-# ── NHL slug map ──────────────────────────────────────────────────────────────
-STATMUSE_NHL_SLUGS = {
-    "nathan mackinnon":      "nathan-mackinnon-1890",
-    "leon draisaitl":        "leon-draisaitl-3049",
-    "connor mcdavid":        "connor-mcdavid-3114",
-    "matthew tkachuk":       "matthew-tkachuk-3936",
-    "david pastrnak":        "david-pastrnak-2755",
-    "auston matthews":       "auston-matthews-3977",
-    "mitch marner":          "mitch-marner-3979",
-    "mikko rantanen":        "mikko-rantanen-3975",
-    "kirill kaprizov":       "kirill-kaprizov-30143",
-    "cale makar":            "cale-makar-30083",
-    "roman josi":            "roman-josi-1940",
-    "victor hedman":         "victor-hedman-1522",
-    "brayden point":         "brayden-point-3944",
-    "nikita kucherov":       "nikita-kucherov-2519",
-    "andrei vasilevskiy":    "andrei-vasilevskiy-2763",
-    "sam reinhart":          "sam-reinhart-2843",
-    "jake guentzel":         "jake-guentzel-3105",
-    "mark scheifele":        "mark-scheifele-2067",
-    "kyle connor":           "kyle-connor-4011",
-    "sean monahan":          "sean-monahan-2625",
-    "elias pettersson":      "elias-pettersson-30059",
-    "j.t. miller":           "jt-miller-2605",
-    "brady tkachuk":         "brady-tkachuk-30080",
-    "tim stutzle":           "tim-stutzle-30197",
-    "josh norris":           "josh-norris-30133",
-    "claude giroux":         "claude-giroux-1264",
-    "trevor zegras":         "trevor-zegras-30179",
-    "mason mctavish":        "mason-mctavish-30248",
-    "troy terry":            "troy-terry-30044",
-    "frank vatrano":         "frank-vatrano-3937",
-    "tage thompson":         "tage-thompson-30050",
-    "rasmus dahlin":         "rasmus-dahlin-30069",
-    "quinn hughes":          "quinn-hughes-30099",
-    "adam fox":              "adam-fox-30105",
-    "miro heiskanen":        "miro-heiskanen-30064",
-    "jonathan huberdeau":    "jonathan-huberdeau-2427",
-    "aleksander barkov":     "aleksander-barkov-2806",
-    "jack eichel":           "jack-eichel-3001",
-    "mark stone":            "mark-stone-2218",
-    "anze kopitar":          "anze-kopitar-643",
-    "drew doughty":          "drew-doughty-1156",
-    "gabriel landeskog":     "gabriel-landeskog-1936",
-    "evgeni malkin":         "evgeni-malkin-521",
-    "sidney crosby":         "sidney-crosby-435",
-    "alex ovechkin":         "alex-ovechkin-418",
-}
 
 
 @app.route("/api/nhl/player/<player_name>/gamelog/statmuse")
 def nhl_gamelog_statmuse(player_name):
-    """
-    Real-time NHL game log from Statmuse SSR (30-min cache).
-    Row format: [Date, Team, vs/@, Opp, Result, G, A, PTS, +/-, SOG, PIM, TOI, ...]
-    """
+    """Recent NHL game log from StatMuse (30-min cache), read by name and header."""
     n_games = min(int(request.args.get("games", 10)), 20)
     cache_key = f"statmuse_nhl_{player_name.lower()}"
-    if cache_key in _cache:
-        ts, data = _cache[cache_key]
-        if time.time() - ts < 1800:
-            return jsonify(data)
-
-    slug = STATMUSE_NHL_SLUGS.get(player_name.lower())
-    if not slug:
-        p_lower = player_name.lower()
-        for key, val in STATMUSE_NHL_SLUGS.items():
-            if p_lower in key or key in p_lower:
-                slug = val
-                break
-    if not slug:
-        return jsonify({"error": "slug_not_found", "player": player_name}), 404
-
+    hit = _sm_cached(cache_key)
+    if hit:
+        return jsonify(hit)
     try:
-        resp = http_requests.get(
-            f"https://www.statmuse.com/nhl/player/{slug}/game-log?seasonYear=2026",
-            headers=STATMUSE_HEADERS, timeout=15
-        )
-        if resp.status_code != 200:
-            return jsonify({"error": f"Statmuse {resp.status_code}"}), 502
-
+        rows, err = _sm_gamelog("nhl", player_name, n_games)
+        if err:
+            return jsonify({"error": err[0], "player": player_name}), err[1]
         games = []
-        for cells in _sm_parse_rows(resp.text):
-            # cells[5]=G, [6]=A, [7]=PTS, [8]=+/-, [9]=SOG, [10]=PIM, [11]=TOI
-            goals   = _safe_float(cells[5],  0, 10) or 0
-            assists = _safe_float(cells[6],  0, 10) or 0
-            shots   = _safe_float(cells[9],  0, 20) or 0
-            toi     = cells[11] if len(cells) > 11 else None
-            # Skip DNP rows — scratched/injured players show 0 across all stats
-            if goals == 0 and assists == 0 and shots == 0 and toi in (None, "0", "0:00", "00:00"):
-                continue
+        for r in rows:
+            goals, assists = _sm_num(r, "G", 0, 10), _sm_num(r, "A", 0, 10)
+            ppg, ppa = _sm_num(r, "PPG", 0, 10), _sm_num(r, "PPA", 0, 10)
             games.append({
-                "date":     cells[0],
-                "is_home":  cells[2] == "vs",
-                "goals":    goals,
-                "assists":  assists,
-                "points":   _safe_float(cells[7],  0, 10) or 0,
-                "shots":    shots,
-                "pim":      _safe_float(cells[10], 0, 50) or 0 if len(cells) > 10 else 0,
-                "toi":      toi,
-                "blocked_shots": 0,  # not in Statmuse table
-                "pp_goals": 0,
-                "pp_points": 0,
+                "date": r.get("DATE"), "is_home": r.get("HA") == "vs",
+                "goals": goals, "assists": assists, "points": _sm_num(r, "P", 0, 15),
+                "plus_minus": _sm_num(r, "+/-", -10, 10), "shots": _sm_num(r, "S", 0, 25),
+                "pim": _sm_num(r, "PIM", 0, 60), "toi": r.get("TOI") or None,
+                "blocked_shots": _sm_num(r, "BKS", 0, 15),
+                "pp_goals": ppg, "pp_points": ppg + ppa,
             })
-            if len(games) >= n_games:
-                break
-
         if not games:
             return jsonify({"error": "No rows parsed", "player": player_name}), 500
-
-        result = {
-            "player_name": player_name, "source": "statmuse",
-            "games_count": len(games), "games": games,
-        }
+        result = {"player_name": player_name, "source": "statmuse",
+                  "games_count": len(games), "games": games}
         _cache[cache_key] = (time.time(), result)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "player": player_name}), 500
 
 
-# ── MLB slug map ──────────────────────────────────────────────────────────────
-STATMUSE_MLB_SLUGS = {
-    "shohei ohtani":         "shohei-ohtani-12592",
-    "freddie freeman":       "freddie-freeman-6418",
-    "mookie betts":          "mookie-betts-7578",
-    "juan soto":             "juan-soto-13865",
-    "aaron judge":           "aaron-judge-10309",
-    "pete alonso":           "pete-alonso-14069",
-    "bryce harper":          "bryce-harper-5680",
-    "trea turner":           "trea-turner-9886",
-    "austin riley":          "austin-riley-14144",
-    "yordan alvarez":        "yordan-alvarez-14302",
-    "jose abreu":            "jose-abreu-6929",
-    "mike trout":            "mike-trout-5765",
-    "paul goldschmidt":      "paul-goldschmidt-5685",
-    "nolan arenado":         "nolan-arenado-5790",
-    "ronald acuna jr":       "ronald-acuna-jr-13907",
-    "cody bellinger":        "cody-bellinger-10265",
-    "corey seager":          "corey-seager-9874",
-    "marcus semien":         "marcus-semien-6590",
-    "bo bichette":           "bo-bichette-14318",
-    "vladimir guerrero jr":  "vladimir-guerrero-jr-14049",
-    "jose ramirez":          "jose-ramirez-8077",
-    "bobby witt jr":         "bobby-witt-jr-15540",
-    "julio rodriguez":       "julio-rodriguez-16225",
-    "gunnar henderson":      "gunnar-henderson-16523",
-    "corbin carroll":        "corbin-carroll-16278",
-    "jackson holliday":      "jackson-holliday-16857",
-    "adley rutschman":       "adley-rutschman-15818",
-    "will smith":            "will-smith-13911",
-    "kyle tucker":           "kyle-tucker-12577",
-    "gerrit cole":           "gerrit-cole-7569",
-    "zack wheeler":          "zack-wheeler-7000",
-    "sandy alcantara":       "sandy-alcantara-13280",
-    "spencer strider":       "spencer-strider-16071",
-    "corbin burnes":         "corbin-burnes-13870",
-    "max scherzer":          "max-scherzer-5234",
-    "justin verlander":      "justin-verlander-3388",
-    "jacob degrom":          "jacob-degrom-8210",
-    "blake snell":           "blake-snell-10145",
-    "yoshinobu yamamoto":    "yoshinobu-yamamoto-17494",
-    "paul skenes":           "paul-skenes-17662",
-}
 
 
 @app.route("/api/mlb/player/<player_name>/gamelog/statmuse")
 def mlb_gamelog_statmuse(player_name):
-    """
-    Real-time MLB game log from Statmuse SSR (30-min cache).
-    Row format: [Date, Team, vs/@, Opp, Result, AB, R, H, HR, RBI, BB, K, ...]
-    """
+    """Recent MLB game log from StatMuse (30-min cache), read by name and header."""
     n_games = min(int(request.args.get("games", 10)), 20)
     cache_key = f"statmuse_mlb_{player_name.lower()}"
-    if cache_key in _cache:
-        ts, data = _cache[cache_key]
-        if time.time() - ts < 1800:
-            return jsonify(data)
-
-    slug = STATMUSE_MLB_SLUGS.get(player_name.lower())
-    if not slug:
-        p_lower = player_name.lower()
-        for key, val in STATMUSE_MLB_SLUGS.items():
-            if p_lower in key or key in p_lower:
-                slug = val
-                break
-    if not slug:
-        return jsonify({"error": "slug_not_found", "player": player_name}), 404
-
+    hit = _sm_cached(cache_key)
+    if hit:
+        return jsonify(hit)
     try:
-        resp = http_requests.get(
-            f"https://www.statmuse.com/mlb/player/{slug}/game-log?seasonYear=2026",
-            headers=STATMUSE_HEADERS, timeout=15
-        )
-        if resp.status_code != 200:
-            return jsonify({"error": f"Statmuse {resp.status_code}"}), 502
-
+        rows, err = _sm_gamelog("mlb", player_name, n_games)
+        if err:
+            return jsonify({"error": err[0], "player": player_name}), err[1]
         games = []
-        for cells in _sm_parse_rows(resp.text):
-            # cells[5]=AB, [6]=R, [7]=H, [8]=HR, [9]=RBI, [10]=BB, [11]=K
-            ab = _safe_float(cells[5], 0, 10)
+        for r in rows:
+            ab = _safe_float(r.get("AB"), 0, 10)
             if ab is None:
                 continue
-            hits  = _safe_float(cells[7],  0, 7) or 0
-            hr    = _safe_float(cells[8],  0, 5) or 0
-            rbi   = _safe_float(cells[9],  0, 15) or 0
-            bb    = _safe_float(cells[10], 0, 6) or 0
-            k     = _safe_float(cells[11], 0, 6) or 0 if len(cells) > 11 else 0
+            h, d2, d3, hr = (_sm_num(r, k, 0, 10) for k in ("H", "2B", "3B", "HR"))
+            runs, rbi = _sm_num(r, "R", 0, 10), _sm_num(r, "RBI", 0, 15)
             games.append({
-                "date":     cells[0],
-                "is_home":  cells[2] == "vs",
-                "ab":       ab or 0,
-                "runs":     _safe_float(cells[6], 0, 6) or 0,
-                "hits":     hits,
-                "homeRuns": hr,
-                "RBIs":     rbi,
-                "walks":    bb,
-                "strikeouts": k,
-                # Derived composites
-                "totalBases":    hits + hr * 3,  # approximate (no 2B/3B from Statmuse)
-                "hitsRunsRBIs":  hits + (_safe_float(cells[6], 0, 6) or 0) + rbi,
+                "date": r.get("DATE"), "is_home": r.get("HA") == "vs", "ab": ab,
+                "runs": runs, "hits": h, "homeRuns": hr, "RBIs": rbi,
+                "walks": _sm_num(r, "BB", 0, 8), "strikeouts": _sm_num(r, "SO", 0, 8),
+                "totalBases": h + d2 + 2 * d3 + 3 * hr,
+                "hitsRunsRBIs": h + runs + rbi,
             })
-            if len(games) >= n_games:
-                break
-
         if not games:
             return jsonify({"error": "No rows parsed", "player": player_name}), 500
-
-        result = {
-            "player_name": player_name, "source": "statmuse",
-            "games_count": len(games), "games": games,
-        }
+        result = {"player_name": player_name, "source": "statmuse",
+                  "games_count": len(games), "games": games}
         _cache[cache_key] = (time.time(), result)
         return jsonify(result)
     except Exception as e:
